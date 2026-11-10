@@ -1,11 +1,11 @@
-<div align="center">
+# ExamEduApp
 
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
+Aplikasi ujian online berbasis web yang ditujukan untuk digunakan di berbagai jenjang pendidikan.
 
-  <h1>Built with AI Studio</h2>
+## Status proyek
 
-  <p>The fastest path from prompt to production with Gemini.</p>
+Repositori ini belum memuat kode sumber aplikasi. Saat ini, satu-satunya berkas proyek yang tersedia adalah `README.md`, sehingga instalasi, konfigurasi, fitur, dan cara menjalankan aplikasi belum dapat dijelaskan atau dicoba.
 
-  <a href="https://aistudio.google.com/apps">Start building</a>
+## Menjalankan aplikasi
 
-</div>
+Belum tersedia langkah untuk menjalankan aplikasi. Petunjuk dapat ditambahkan setelah kode sumber, teknologi yang digunakan, dan konfigurasi proyek tersedia di repositori ini.
