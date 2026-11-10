@@ -12,11 +12,28 @@ const { Pool } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 8787);
 const host = process.env.HOST || '0.0.0.0';
-const connectionString = process.env.DATABASE_URL;
-if (!connectionString) throw new Error('DATABASE_URL wajib diatur untuk menghubungkan backend ke PostgreSQL.');
+const connectionString = process.env.DATABASE_URL?.trim();
+const separatePostgresKeys = ['PGHOST', 'PGPORT', 'PGDATABASE', 'PGUSER', 'PGPASSWORD'];
+const configuredSeparatePostgresKeys = separatePostgresKeys.filter((key) => process.env[key] !== undefined && process.env[key] !== '');
+const missingSeparatePostgresKeys = separatePostgresKeys.filter((key) => !process.env[key]);
+if (!connectionString && missingSeparatePostgresKeys.length !== 0) {
+  const detail = configuredSeparatePostgresKeys.length === 0
+    ? 'DATABASE_URL atau konfigurasi lengkap PGHOST, PGPORT, PGDATABASE, PGUSER, dan PGPASSWORD'
+    : `konfigurasi PG lengkap (kurang: ${missingSeparatePostgresKeys.join(', ')})`;
+  throw new Error(`${detail} wajib diatur untuk menghubungkan backend ke PostgreSQL.`);
+}
+if (!connectionString && (!/^\d+$/.test(process.env.PGPORT) || Number(process.env.PGPORT) < 1 || Number(process.env.PGPORT) > 65535)) {
+  throw new Error('PGPORT harus berupa nomor port antara 1 dan 65535.');
+}
 
 const pool = new Pool({
-  connectionString,
+  ...(connectionString ? { connectionString } : {
+    host: process.env.PGHOST,
+    port: Number(process.env.PGPORT),
+    database: process.env.PGDATABASE,
+    user: process.env.PGUSER,
+    password: process.env.PGPASSWORD,
+  }),
   max: Number(process.env.PG_POOL_SIZE || 5),
   connectionTimeoutMillis: 10000,
   idleTimeoutMillis: 30000,

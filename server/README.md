@@ -10,11 +10,11 @@ Persyaratan: Node.js 20 atau lebih baru dan database PostgreSQL.
 cd server
 npm install
 cp .env.example .env
-# Isi DATABASE_URL dengan koneksi PostgreSQL; jangan commit file .env.
+# Isi DATABASE_URL atau kelima field PGHOST, PGPORT, PGDATABASE, PGUSER, dan PGPASSWORD; jangan commit file .env.
 npm run dev
 ```
 
-Untuk Supabase, gunakan URL dari **Connect → Session pooler** (port 5432) sebagai `DATABASE_URL`. Jika kata sandi memiliki karakter khusus, gunakan URL-encoding. Pastikan `DATABASE_SSL=true`. Server menjalankan migrasi skema versi 1 saat startup.
+Untuk Supabase, gunakan URL dari **Connect → Session pooler** (port 5432) sebagai `DATABASE_URL`, atau isi konfigurasi terpisah `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, dan `PGPASSWORD`. Format terpisah berguna jika password disediakan sebagai secret opaque dan tidak boleh dimasukkan ke URL. Pastikan `DATABASE_SSL=true`. Server menjalankan migrasi skema versi 1 saat startup.
 
 Di terminal lain, jalankan kedua frontend (`npm run dev`; ExamPortalApp dapat memakai port 5174). Atur `VITE_API_URL` pada build frontend ke URL backend; saat pengembangan lokal, kosongkan agar Vite memakai proxy `/api` ke port 8787. Guru mendaftar dengan `TEACHER_SIGNUP_CODE`; siswa dapat membuat akun tanpa kode.
 
@@ -22,7 +22,7 @@ Di terminal lain, jalankan kedua frontend (`npm run dev`; ExamPortalApp dapat me
 
 Atur variabel di platform hosting, bukan di repositori:
 
-- `DATABASE_URL`: koneksi PostgreSQL Supabase, simpan sebagai secret.
+- `DATABASE_URL`: koneksi PostgreSQL Supabase, simpan sebagai secret; alternatifnya, isi lengkap `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, dan `PGPASSWORD` sebagai variabel terpisah.
 - `DATABASE_SSL=true` dan `NODE_ENV=production`.
 - `APP_ORIGINS`: daftar origin persis aplikasi guru dan siswa, dipisahkan koma. Jangan gunakan `*` karena cookie memakai kredensial.
 - `TEACHER_SIGNUP_CODE`: kode undangan privat yang panjang; jangan taruh di kode frontend.
