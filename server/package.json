@@ -1,6 +1,6 @@
 {
   "name": "examedu-api",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "type": "module",
   "engines": {
@@ -8,13 +8,14 @@
   },
   "scripts": {
     "dev": "node --watch index.js",
-    "start": "node index.js"
+    "start": "node index.js",
+    "test:integration": "node test/integration.mjs"
   },
   "dependencies": {
-    "better-sqlite3": "^11.7.0",
     "cookie-parser": "^1.4.7",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
-    "express-rate-limit": "^7.5.0"
+    "express-rate-limit": "^7.5.0",
+    "pg": "^8.16.3"
   }
 }

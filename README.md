@@ -1,6 +1,6 @@
 # ExamEduApp
 
-Panel web untuk pengajar mengelola ujian online. Front-end dibuat dengan React 18, TypeScript, Vite, dan Lucide React; backend bersama menggunakan Node.js, Express, dan SQLite.
+Panel web untuk pengajar mengelola ujian online. Front-end dibuat dengan React 18, TypeScript, Vite, dan Lucide React; backend bersama menggunakan Node.js, Express, dan PostgreSQL.
 
 ## Menjalankan secara lokal
 
@@ -12,7 +12,7 @@ Persyaratan: Node.js 20 atau lebih baru.
    npm install
    cp .env.example .env
    ```
-   Ganti `TEACHER_SIGNUP_CODE` di `.env` dengan kode privat, lalu jalankan `npm run dev`.
+   Isi `DATABASE_URL` dengan koneksi PostgreSQL/Supabase dan ganti `TEACHER_SIGNUP_CODE` dengan kode privat, lalu jalankan `npm run dev`.
 2. Di terminal lain, dari akar repositori ini jalankan:
    ```bash
    npm install
@@ -27,10 +27,10 @@ Frontend meneruskan permintaan `/api` ke `http://localhost:8787`. Untuk setup no
 - Registrasi/masuk pengajar dengan kode undangan, sesi cookie HttpOnly, dan logout.
 - Membuat ujian yang berisi soal pilihan ganda (1–30 soal), menyimpan sebagai draft, lalu menerbitkan untuk akun siswa.
 - Daftar ujian dan statistik peserta/nilai yang dibaca dari server.
-- Penyimpanan akun, ujian, soal, sesi, jawaban, dan hasil di SQLite.
+- Penyimpanan akun, ujian, soal, sesi, jawaban, dan hasil di PostgreSQL.
 
 ## Batasan yang diketahui
 
-Bank soal terpisah dan beberapa pengaturan workspace masih contoh/placeholder. Backend ini belum di-host atau dipasang pada domain publik. Gunakan HTTPS, pengelolaan secret dan backup yang sesuai sebelum dipakai untuk ujian resmi; backend dasar ini bukan sistem proctoring atau anti-kecurangan.
+Bank soal terpisah dan beberapa pengaturan workspace masih contoh/placeholder. `render.yaml` menyiapkan backend pada Render Free dengan database Supabase PostgreSQL eksternal; URL aktif dan environment tetap harus diselesaikan di platform hosting. Paket gratis dapat tidur/dijeda dan tidak cocok untuk ujian produksi yang kritis. Gunakan HTTPS, pengelolaan secret dan backup yang sesuai sebelum dipakai untuk ujian resmi; backend dasar ini bukan sistem proctoring atau anti-kecurangan.
 
 > **Akses kelas:** semua siswa terdaftar saat ini dapat melihat semua ujian terbit. Kelas pada form masih label, bukan pembatas akses; jangan gunakan untuk membagikan ujian rahasia per kelas sebelum roster/enrollment ditambahkan.

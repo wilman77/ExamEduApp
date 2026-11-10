@@ -3,80 +3,61 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Database from 'better-sqlite3';
+import pg from 'pg';
 import cookieParser from 'cookie-parser';
 import express from 'express';
 import { rateLimit } from 'express-rate-limit';
 
+const { Pool } = pg;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const port = Number(process.env.PORT || 8787);
-const databasePath = path.resolve(process.env.DATABASE_PATH || path.join(__dirname, 'data', 'examedu.sqlite'));
-const defaultOrigins = 'http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174';
-const allowedOrigins = new Set((process.env.APP_ORIGINS || defaultOrigins).split(',').map((origin) => origin.trim()).filter(Boolean));
+const host = process.env.HOST || '0.0.0.0';
+const connectionString = process.env.DATABASE_URL;
+if (!connectionString) throw new Error('DATABASE_URL wajib diatur untuk menghubungkan backend ke PostgreSQL.');
+
+const pool = new Pool({
+  connectionString,
+  max: Number(process.env.PG_POOL_SIZE || 5),
+  connectionTimeoutMillis: 10000,
+  idleTimeoutMillis: 30000,
+  ssl: process.env.DATABASE_SSL === 'false' ? false : { rejectUnauthorized: true },
+});
+pool.on('error', (error) => console.error('Unexpected PostgreSQL pool error:', error));
+
+const migrationDirectory = path.join(__dirname, 'migrations');
+async function migrate() {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock($1)', [48201921]);
+    await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)');
+    const applied = await client.query('SELECT version FROM schema_migrations WHERE version = $1', [1]);
+    if (applied.rowCount === 0) {
+      const migration = fs.readFileSync(path.join(migrationDirectory, '001_initial.sql'), 'utf8');
+      await client.query(migration);
+      await client.query('INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)', [1, Date.now()]);
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+const isProduction = process.env.NODE_ENV === 'production';
+const defaultOrigins = isProduction ? '' : 'http://localhost:5173,http://localhost:5174,http://127.0.0.1:5173,http://127.0.0.1:5174';
+const allowedOrigins = new Set((process.env.APP_ORIGINS ?? defaultOrigins).split(',').map((origin) => origin.trim()).filter(Boolean));
 const sessionCookieName = (role) => `exam_${role}_session`;
 const sessionDays = 7;
 const sameSite = (process.env.COOKIE_SAMESITE || 'lax').toLowerCase();
-const secureCookie = process.env.COOKIE_SECURE === 'true' || (process.env.NODE_ENV === 'production' && sameSite === 'none');
-
-fs.mkdirSync(path.dirname(databasePath), { recursive: true });
-const db = new Database(databasePath);
-db.pragma('journal_mode = WAL');
-db.pragma('foreign_keys = ON');
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    email TEXT NOT NULL UNIQUE COLLATE NOCASE,
-    role TEXT NOT NULL CHECK (role IN ('teacher', 'student')),
-    salt TEXT NOT NULL,
-    password_hash TEXT NOT NULL,
-    created_at INTEGER NOT NULL
-  );
-  CREATE TABLE IF NOT EXISTS sessions (
-    token_hash TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    expires_at INTEGER NOT NULL,
-    created_at INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id);
-  CREATE TABLE IF NOT EXISTS exams (
-    id TEXT PRIMARY KEY,
-    owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    title TEXT NOT NULL,
-    subject TEXT NOT NULL,
-    grade TEXT NOT NULL,
-    exam_date TEXT NOT NULL,
-    duration_minutes INTEGER NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('draft', 'published')),
-    created_at INTEGER NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS exams_owner_idx ON exams(owner_id, created_at DESC);
-  CREATE TABLE IF NOT EXISTS questions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    exam_id TEXT NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
-    position INTEGER NOT NULL,
-    prompt TEXT NOT NULL,
-    options_json TEXT NOT NULL,
-    answer_index INTEGER NOT NULL,
-    explanation TEXT NOT NULL DEFAULT ''
-  );
-  CREATE INDEX IF NOT EXISTS questions_exam_idx ON questions(exam_id, position);
-  CREATE TABLE IF NOT EXISTS attempts (
-    id TEXT PRIMARY KEY,
-    exam_id TEXT NOT NULL REFERENCES exams(id) ON DELETE CASCADE,
-    student_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    started_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    submitted_at INTEGER,
-    answers_json TEXT NOT NULL DEFAULT '{}',
-    score INTEGER,
-    UNIQUE(student_id, exam_id)
-  );
-  CREATE INDEX IF NOT EXISTS attempts_exam_idx ON attempts(exam_id);
-`);
+if (!['lax', 'strict', 'none'].includes(sameSite)) throw new Error('COOKIE_SAMESITE harus berupa lax, strict, atau none.');
+const secureCookie = process.env.COOKIE_SECURE === 'true' || isProduction;
+if (sameSite === 'none' && !secureCookie) throw new Error('COOKIE_SAMESITE=none memerlukan COOKIE_SECURE=true.');
 
 const app = express();
-if (process.env.NODE_ENV === 'production') app.set('trust proxy', 1);
+if (isProduction) app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use(express.json({ limit: '100kb' }));
 app.use(cookieParser());
@@ -106,6 +87,25 @@ function badRequest(res, message, status = 400) {
   return res.status(status).json({ error: message });
 }
 
+function asyncRoute(handler) {
+  return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+async function withTransaction(callback) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await callback(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (error) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 function hash(value) {
   return crypto.createHash('sha256').update(value).digest('hex');
 }
@@ -118,16 +118,19 @@ function publicUser(row) {
   return { id: row.id, name: row.name, email: row.email, role: row.role };
 }
 
-function setSession(res, userId, role) {
-  db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(Date.now());
+async function createSession(userId, executor = pool) {
+  await executor.query('DELETE FROM sessions WHERE expires_at <= $1', [Date.now()]);
   const rawToken = crypto.randomBytes(32).toString('base64url');
   const now = Date.now();
-  db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES (?, ?, ?, ?)')
-    .run(hash(rawToken), userId, now + sessionDays * 24 * 60 * 60 * 1000, now);
+  await executor.query('INSERT INTO sessions (token_hash, user_id, expires_at, created_at) VALUES ($1, $2, $3, $4)', [hash(rawToken), userId, now + sessionDays * 24 * 60 * 60 * 1000, now]);
+  return rawToken;
+}
+
+function writeSessionCookie(res, rawToken, role) {
   res.cookie(sessionCookieName(role), rawToken, {
     httpOnly: true,
     secure: secureCookie,
-    sameSite: sameSite === 'none' ? 'none' : 'lax',
+    sameSite,
     path: '/',
     maxAge: sessionDays * 24 * 60 * 60 * 1000,
   });
@@ -137,25 +140,26 @@ function clearSession(res, role) {
   res.clearCookie(sessionCookieName(role), {
     httpOnly: true,
     secure: secureCookie,
-    sameSite: sameSite === 'none' ? 'none' : 'lax',
+    sameSite,
     path: '/',
   });
 }
 
-function optionalAuth(req, _res, next) {
+app.use('/api', asyncRoute(async (req, _res, next) => {
   const requestedRole = req.get('X-Exam-Role') || req.body?.role;
   if (requestedRole !== 'teacher' && requestedRole !== 'student') return next();
   const rawToken = req.cookies[sessionCookieName(requestedRole)];
   if (!rawToken) return next();
-  const row = db.prepare(`SELECT users.id, users.name, users.email, users.role, sessions.token_hash
+  const result = await pool.query(`SELECT users.id, users.name, users.email, users.role, sessions.token_hash
     FROM sessions JOIN users ON users.id = sessions.user_id
-    WHERE sessions.token_hash = ? AND sessions.expires_at > ?`).get(hash(rawToken), Date.now());
+    WHERE sessions.token_hash = $1 AND sessions.expires_at > $2`, [hash(rawToken), Date.now()]);
+  const row = result.rows[0];
   if (row) {
     req.user = publicUser(row);
     req.sessionHash = row.token_hash;
   }
-  next();
-}
+  return next();
+}));
 
 function requireAuth(req, res, next) {
   if (!req.user) return badRequest(res, 'Silakan masuk untuk melanjutkan.', 401);
@@ -170,11 +174,13 @@ function requireRole(role) {
   };
 }
 
-app.use('/api', optionalAuth);
-app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+app.get('/health', asyncRoute(async (_req, res) => {
+  await pool.query('SELECT 1');
+  res.json({ status: 'ok' });
+}));
 app.get('/api/auth/me', (req, res) => res.json({ user: req.user || null }));
 
-app.post('/api/auth/register', authLimiter, (req, res) => {
+app.post('/api/auth/register', authLimiter, asyncRoute(async (req, res) => {
   const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
   const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
@@ -192,79 +198,81 @@ app.post('/api/auth/register', authLimiter, (req, res) => {
       return badRequest(res, 'Kode undangan pengajar tidak valid.', 403);
     }
   }
-  if (db.prepare('SELECT id FROM users WHERE email = ?').get(email)) return badRequest(res, 'Email ini sudah terdaftar. Silakan masuk.', 409);
-
   const id = crypto.randomUUID();
   const salt = crypto.randomBytes(16).toString('hex');
   const passwordHash = makePasswordHash(password, salt);
   try {
-    db.prepare('INSERT INTO users (id, name, email, role, salt, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(id, name, email, role, salt, passwordHash, Date.now());
+    const registration = await withTransaction(async (client) => {
+      const inserted = await client.query('INSERT INTO users (id, name, email, role, salt, password_hash, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, name, email, role', [id, name, email, role, salt, passwordHash, Date.now()]);
+      const sessionToken = await createSession(id, client);
+      return { user: inserted.rows[0], sessionToken };
+    });
+    writeSessionCookie(res, registration.sessionToken, role);
+    return res.status(201).json({ user: publicUser(registration.user) });
   } catch (error) {
-    if (error?.code === 'SQLITE_CONSTRAINT_UNIQUE') return badRequest(res, 'Email ini sudah terdaftar. Silakan masuk.', 409);
+    if (error?.code === '23505') return badRequest(res, 'Email ini sudah terdaftar. Silakan masuk.', 409);
     throw error;
   }
-  const user = db.prepare('SELECT id, name, email, role FROM users WHERE id = ?').get(id);
-  setSession(res, id, role);
-  return res.status(201).json({ user: publicUser(user) });
-});
+}));
 
-app.post('/api/auth/login', authLimiter, (req, res) => {
+app.post('/api/auth/login', authLimiter, asyncRoute(async (req, res) => {
   const email = typeof req.body.email === 'string' ? req.body.email.trim().toLowerCase() : '';
   const password = typeof req.body.password === 'string' ? req.body.password : '';
   const role = req.body.role;
   if (!email || !password || (role !== 'teacher' && role !== 'student')) return badRequest(res, 'Email dan kata sandi wajib diisi.');
-  const row = db.prepare('SELECT * FROM users WHERE email = ?').get(email);
+  const result = await pool.query('SELECT * FROM users WHERE lower(email) = $1', [email]);
+  const row = result.rows[0];
   const candidate = row ? makePasswordHash(password, row.salt) : '';
   const valid = row && candidate.length === row.password_hash.length && crypto.timingSafeEqual(Buffer.from(candidate), Buffer.from(row.password_hash));
   if (!valid || row.role !== role) return badRequest(res, 'Email, kata sandi, atau jenis akun tidak cocok.', 401);
-  if (req.sessionHash) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(req.sessionHash);
-  setSession(res, row.id, row.role);
+  if (req.sessionHash) await pool.query('DELETE FROM sessions WHERE token_hash = $1', [req.sessionHash]);
+  const sessionToken = await createSession(row.id);
+  writeSessionCookie(res, sessionToken, row.role);
   return res.json({ user: publicUser(row) });
-});
+}));
 
-app.post('/api/auth/logout', requireAuth, (req, res) => {
-  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(req.sessionHash);
+app.post('/api/auth/logout', requireAuth, asyncRoute(async (req, res) => {
+  await pool.query('DELETE FROM sessions WHERE token_hash = $1', [req.sessionHash]);
   clearSession(res, req.user.role);
   res.json({ ok: true });
-});
+}));
 
-app.get('/api/exams', requireAuth, (req, res) => {
+app.get('/api/exams', requireAuth, asyncRoute(async (req, res) => {
   if (req.user.role === 'teacher') {
-    const exams = db.prepare(`SELECT e.*,
+    const result = await pool.query(`SELECT e.*,
       (SELECT COUNT(*) FROM questions q WHERE q.exam_id = e.id) AS question_count,
       (SELECT COUNT(*) FROM attempts a WHERE a.exam_id = e.id) AS participant_count,
       (SELECT COUNT(*) FROM attempts a WHERE a.exam_id = e.id AND a.submitted_at IS NOT NULL) AS submission_count,
       (SELECT AVG(a.score * 100.0 / NULLIF((SELECT COUNT(*) FROM questions q WHERE q.exam_id = e.id), 0))
         FROM attempts a WHERE a.exam_id = e.id AND a.submitted_at IS NOT NULL) AS average_score
-      FROM exams e WHERE e.owner_id = ? ORDER BY e.created_at DESC`).all(req.user.id);
-    return res.json({ exams: exams.map((exam) => ({
+      FROM exams e WHERE e.owner_id = $1 ORDER BY e.created_at DESC`, [req.user.id]);
+    return res.json({ exams: result.rows.map((exam) => ({
       id: exam.id, title: exam.title, subject: exam.subject, grade: exam.grade,
-      date: exam.exam_date, duration: exam.duration_minutes, status: exam.status,
-      questionCount: exam.question_count, participants: exam.participant_count,
-      submissionCount: exam.submission_count,
-      averageScore: exam.average_score === null ? null : Math.round(exam.average_score * 10) / 10,
+      date: exam.exam_date, duration: Number(exam.duration_minutes), status: exam.status,
+      questionCount: Number(exam.question_count), participants: Number(exam.participant_count),
+      submissionCount: Number(exam.submission_count),
+      averageScore: exam.average_score === null ? null : Math.round(Number(exam.average_score) * 10) / 10,
     })) });
   }
-  const exams = db.prepare(`SELECT e.*,
+  const result = await pool.query(`SELECT e.*,
       (SELECT COUNT(*) FROM questions q WHERE q.exam_id = e.id) AS question_count,
       a.id AS attempt_id, a.submitted_at, a.expires_at, a.score,
       (SELECT COUNT(*) FROM questions q WHERE q.exam_id = e.id) AS total_questions
     FROM exams e
-    LEFT JOIN attempts a ON a.exam_id = e.id AND a.student_id = ?
+    LEFT JOIN attempts a ON a.exam_id = e.id AND a.student_id = $1
     WHERE e.status = 'published'
-    ORDER BY e.exam_date ASC, e.created_at DESC`).all(req.user.id);
-  return res.json({ exams: exams.map((exam) => ({
+    ORDER BY e.exam_date ASC, e.created_at DESC`, [req.user.id]);
+  return res.json({ exams: result.rows.map((exam) => ({
     id: exam.id, title: exam.title, subject: exam.subject, grade: exam.grade,
-    date: exam.exam_date, duration: exam.duration_minutes, status: exam.status,
-    questionCount: exam.question_count,
+    date: exam.exam_date, duration: Number(exam.duration_minutes), status: exam.status,
+    questionCount: Number(exam.question_count),
     attempt: exam.attempt_id ? {
       id: exam.attempt_id,
-      status: exam.submitted_at ? 'submitted' : (exam.expires_at <= Date.now() ? 'expired' : 'in_progress'),
-      score: exam.score === null ? null : Math.round((exam.score / Math.max(1, exam.total_questions)) * 100),
+      status: exam.submitted_at ? 'submitted' : (Number(exam.expires_at) <= Date.now() ? 'expired' : 'in_progress'),
+      score: exam.score === null ? null : Math.round((Number(exam.score) / Math.max(1, Number(exam.total_questions))) * 100),
     } : null,
   })) });
-});
+}));
 
 function validateExamInput(body) {
   const title = typeof body.title === 'string' ? body.title.trim() : '';
@@ -287,74 +295,89 @@ function validateExamInput(body) {
   return null;
 }
 
-app.post('/api/exams', writeLimiter, requireRole('teacher'), (req, res) => {
+app.post('/api/exams', writeLimiter, requireRole('teacher'), asyncRoute(async (req, res) => {
   const validationError = validateExamInput(req.body);
   if (validationError) return badRequest(res, validationError);
   const examId = crypto.randomUUID();
   const now = Date.now();
-  const insertExam = db.prepare(`INSERT INTO exams (id, owner_id, title, subject, grade, exam_date, duration_minutes, status, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 'draft', ?)`);
-  const insertQuestion = db.prepare(`INSERT INTO questions (exam_id, position, prompt, options_json, answer_index, explanation)
-    VALUES (?, ?, ?, ?, ?, ?)`);
-  const save = db.transaction(() => {
-    insertExam.run(examId, req.user.id, req.body.title.trim(), req.body.subject.trim(), req.body.grade.trim(), req.body.date, Number(req.body.duration), now);
-    req.body.questions.forEach((question, index) => insertQuestion.run(examId, index, question.prompt.trim(), JSON.stringify(question.options.map((option) => option.trim())), question.answer, question.explanation.trim()));
+  await withTransaction(async (client) => {
+    await client.query(`INSERT INTO exams (id, owner_id, title, subject, grade, exam_date, duration_minutes, status, created_at)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft', $8)`, [examId, req.user.id, req.body.title.trim(), req.body.subject.trim(), req.body.grade.trim(), req.body.date, Number(req.body.duration), now]);
+    for (const [index, question] of req.body.questions.entries()) {
+      await client.query('INSERT INTO questions (exam_id, position, prompt, options_json, answer_index, explanation) VALUES ($1, $2, $3, $4, $5, $6)', [examId, index, question.prompt.trim(), JSON.stringify(question.options.map((option) => option.trim())), question.answer, question.explanation.trim()]);
+    }
   });
-  save();
   return res.status(201).json({ exam: {
     id: examId, title: req.body.title.trim(), subject: req.body.subject.trim(), grade: req.body.grade.trim(),
     date: req.body.date, duration: Number(req.body.duration), status: 'draft',
     questionCount: req.body.questions.length, participants: 0, submissionCount: 0, averageScore: null,
   } });
-});
+}));
 
-app.post('/api/exams/:examId/publish', writeLimiter, requireRole('teacher'), (req, res) => {
-  const exam = db.prepare('SELECT id, owner_id FROM exams WHERE id = ?').get(req.params.examId);
-  if (!exam || exam.owner_id !== req.user.id) return badRequest(res, 'Ujian tidak ditemukan.', 404);
-  const count = db.prepare('SELECT COUNT(*) AS count FROM questions WHERE exam_id = ?').get(exam.id).count;
-  if (count < 1) return badRequest(res, 'Tambahkan setidaknya satu soal sebelum menerbitkan ujian.');
-  db.prepare("UPDATE exams SET status = 'published' WHERE id = ?").run(exam.id);
+app.post('/api/exams/:examId/publish', writeLimiter, requireRole('teacher'), asyncRoute(async (req, res) => {
+  const result = await pool.query(`UPDATE exams e SET status = 'published'
+    WHERE e.id = $1 AND e.owner_id = $2
+      AND EXISTS (SELECT 1 FROM questions q WHERE q.exam_id = e.id)
+    RETURNING e.id`, [req.params.examId, req.user.id]);
+  if (result.rowCount === 0) return badRequest(res, 'Ujian tidak ditemukan atau belum memiliki soal.', 404);
   res.json({ ok: true });
-});
+}));
 
-function getExamForStudent(examId) {
-  return db.prepare("SELECT * FROM exams WHERE id = ? AND status = 'published'").get(examId);
+async function getExamForStudent(examId) {
+  const result = await pool.query("SELECT * FROM exams WHERE id = $1 AND status = 'published'", [examId]);
+  return result.rows[0] || null;
 }
 
-function questionRows(examId) {
-  return db.prepare('SELECT id, position, prompt, options_json, answer_index, explanation FROM questions WHERE exam_id = ? ORDER BY position, id').all(examId);
+async function questionRows(examId, executor = pool) {
+  const result = await executor.query('SELECT id, position, prompt, options_json, answer_index, explanation FROM questions WHERE exam_id = $1 ORDER BY position, id', [examId]);
+  return result.rows;
 }
 
 function listQuestions(rows, revealAnswers = false) {
   return rows.map((question) => ({
-    id: question.id,
+    id: Number(question.id),
     prompt: question.prompt,
     options: JSON.parse(question.options_json),
-    ...(revealAnswers ? { answer: question.answer_index, explanation: question.explanation } : {}),
+    ...(revealAnswers ? { answer: Number(question.answer_index), explanation: question.explanation } : {}),
   }));
 }
 
-function finalizeAttempt(attempt) {
+async function finalizeLockedAttempt(client, attempt) {
   if (attempt.submitted_at) return attempt;
   const answers = JSON.parse(attempt.answers_json || '{}');
-  const questions = questionRows(attempt.exam_id);
-  const score = questions.reduce((total, question, index) => total + (Number(answers[index]) === question.answer_index ? 1 : 0), 0);
+  const questions = await questionRows(attempt.exam_id, client);
+  const score = questions.reduce((total, question, index) => total + (Number(answers[index]) === Number(question.answer_index) ? 1 : 0), 0);
   const submittedAt = Date.now();
-  db.prepare('UPDATE attempts SET submitted_at = ?, score = ? WHERE id = ? AND submitted_at IS NULL').run(submittedAt, score, attempt.id);
-  return db.prepare('SELECT * FROM attempts WHERE id = ?').get(attempt.id);
+  const updated = await client.query('UPDATE attempts SET submitted_at = $1, score = $2 WHERE id = $3 RETURNING *', [submittedAt, score, attempt.id]);
+  return updated.rows[0];
 }
 
-function attemptDto(attempt) {
-  const exam = db.prepare('SELECT id, title, subject, grade, exam_date, duration_minutes FROM exams WHERE id = ?').get(attempt.exam_id);
-  const questions = questionRows(attempt.exam_id);
+async function lockAttempt(client, attemptId) {
+  const result = await client.query('SELECT * FROM attempts WHERE id = $1 FOR UPDATE', [attemptId]);
+  if (!result.rows[0]) throw new Error('Attempt no longer exists.');
+  return result.rows[0];
+}
+
+async function finalizeAttempt(attempt) {
+  return withTransaction(async (client) => {
+    const current = await lockAttempt(client, attempt.id);
+    return finalizeLockedAttempt(client, current);
+  });
+}
+
+async function attemptDto(attempt) {
+  const examResult = await pool.query('SELECT id, title, subject, grade, exam_date, duration_minutes FROM exams WHERE id = $1', [attempt.exam_id]);
+  const exam = examResult.rows[0];
+  if (!exam) throw new Error('Attempt references a missing exam.');
+  const questions = await questionRows(attempt.exam_id);
   const answers = JSON.parse(attempt.answers_json || '{}');
   const common = {
     id: attempt.id,
     status: attempt.submitted_at ? 'submitted' : 'in_progress',
-    startedAt: attempt.started_at,
-    expiresAt: attempt.expires_at,
+    startedAt: Number(attempt.started_at),
+    expiresAt: Number(attempt.expires_at),
     answers,
-    exam: { id: exam.id, title: exam.title, subject: exam.subject, grade: exam.grade, date: exam.exam_date, duration: exam.duration_minutes },
+    exam: { id: exam.id, title: exam.title, subject: exam.subject, grade: exam.grade, date: exam.exam_date, duration: Number(exam.duration_minutes) },
   };
   if (!attempt.submitted_at) return { ...common, questions: listQuestions(questions) };
   const review = listQuestions(questions, true).map((question, index) => ({
@@ -363,10 +386,10 @@ function attemptDto(attempt) {
     correct: answers[index] !== undefined && Number(answers[index]) === question.answer,
   }));
   const questionCount = questions.length;
-  const score = attempt.score || 0;
+  const score = Number(attempt.score || 0);
   return {
     ...common,
-    submittedAt: attempt.submitted_at,
+    submittedAt: Number(attempt.submitted_at),
     questions: review,
     result: {
       score,
@@ -378,76 +401,96 @@ function attemptDto(attempt) {
   };
 }
 
-app.post('/api/exams/:examId/attempts', writeLimiter, requireRole('student'), (req, res) => {
-  const exam = getExamForStudent(req.params.examId);
+app.post('/api/exams/:examId/attempts', writeLimiter, requireRole('student'), asyncRoute(async (req, res) => {
+  const exam = await getExamForStudent(req.params.examId);
   if (!exam) return badRequest(res, 'Ujian tidak ditemukan atau belum diterbitkan.', 404);
-  let attempt = db.prepare('SELECT * FROM attempts WHERE exam_id = ? AND student_id = ?').get(exam.id, req.user.id);
+  let attemptResult = await pool.query('SELECT * FROM attempts WHERE exam_id = $1 AND student_id = $2', [exam.id, req.user.id]);
+  let attempt = attemptResult.rows[0];
   if (attempt) {
     if (attempt.submitted_at) return badRequest(res, 'Ujian ini sudah dikumpulkan.', 409);
-    if (attempt.expires_at <= Date.now()) {
-      attempt = finalizeAttempt(attempt);
-      return res.status(409).json({ error: 'Waktu ujian sudah habis.', attempt: attemptDto(attempt) });
+    if (Number(attempt.expires_at) <= Date.now()) {
+      attempt = await finalizeAttempt(attempt);
+      return res.status(409).json({ error: 'Waktu ujian sudah habis.', attempt: await attemptDto(attempt) });
     }
-    return res.json({ attempt: attemptDto(attempt) });
+    return res.json({ attempt: await attemptDto(attempt) });
   }
   const startedAt = Date.now();
   const attemptId = crypto.randomUUID();
-  db.prepare('INSERT INTO attempts (id, exam_id, student_id, started_at, expires_at, answers_json) VALUES (?, ?, ?, ?, ?, ?)')
-    .run(attemptId, exam.id, req.user.id, startedAt, startedAt + exam.duration_minutes * 60 * 1000, '{}');
-  attempt = db.prepare('SELECT * FROM attempts WHERE id = ?').get(attemptId);
-  return res.status(201).json({ attempt: attemptDto(attempt) });
-});
+  const inserted = await pool.query(`INSERT INTO attempts (id, exam_id, student_id, started_at, expires_at, answers_json)
+    VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (student_id, exam_id) DO NOTHING RETURNING *`, [attemptId, exam.id, req.user.id, startedAt, startedAt + Number(exam.duration_minutes) * 60 * 1000, '{}']);
+  attempt = inserted.rows[0];
+  if (!attempt) {
+    attemptResult = await pool.query('SELECT * FROM attempts WHERE exam_id = $1 AND student_id = $2', [exam.id, req.user.id]);
+    attempt = attemptResult.rows[0];
+    if (!attempt) throw new Error('Attempt conflict occurred but no attempt row was found.');
+    if (attempt.submitted_at) return badRequest(res, 'Ujian ini sudah dikumpulkan.', 409);
+    if (Number(attempt.expires_at) <= Date.now()) {
+      attempt = await finalizeAttempt(attempt);
+      return res.status(409).json({ error: 'Waktu ujian sudah habis.', attempt: await attemptDto(attempt) });
+    }
+    return res.json({ attempt: await attemptDto(attempt) });
+  }
+  return res.status(201).json({ attempt: await attemptDto(attempt) });
+}));
 
-function ownedAttempt(req, res, next) {
-  const attempt = db.prepare('SELECT * FROM attempts WHERE id = ?').get(req.params.attemptId);
+const ownedAttempt = asyncRoute(async (req, res, next) => {
+  const result = await pool.query('SELECT * FROM attempts WHERE id = $1', [req.params.attemptId]);
+  const attempt = result.rows[0];
   if (!attempt) return badRequest(res, 'Sesi ujian tidak ditemukan.', 404);
   if (attempt.student_id !== req.user.id) return badRequest(res, 'Sesi ujian ini bukan milik akun Anda.', 403);
   req.attempt = attempt;
-  next();
-}
-
-app.get('/api/attempts/:attemptId', requireRole('student'), ownedAttempt, (req, res) => {
-  let attempt = req.attempt;
-  if (!attempt.submitted_at && attempt.expires_at <= Date.now()) attempt = finalizeAttempt(attempt);
-  res.json({ attempt: attemptDto(attempt) });
+  return next();
 });
 
-app.put('/api/attempts/:attemptId/answers', writeLimiter, requireRole('student'), ownedAttempt, (req, res) => {
-  const attempt = req.attempt;
-  if (attempt.submitted_at) return badRequest(res, 'Jawaban sudah dikumpulkan dan tidak dapat diubah.', 409);
-  if (attempt.expires_at <= Date.now()) {
-    const completed = finalizeAttempt(attempt);
-    return res.status(409).json({ error: 'Waktu ujian sudah habis.', attempt: attemptDto(completed) });
-  }
-  const answers = req.body.answers;
-  if (!answers || typeof answers !== 'object' || Array.isArray(answers)) return badRequest(res, 'Format jawaban tidak valid.');
-  const questions = questionRows(attempt.exam_id);
-  for (const [indexText, selected] of Object.entries(answers)) {
-    const index = Number(indexText);
-    if (!Number.isInteger(index) || index < 0 || index >= questions.length || !Number.isInteger(selected) || selected < 0 || selected >= JSON.parse(questions[index].options_json).length) {
-      return badRequest(res, 'Pilihan jawaban tidak valid.');
+app.get('/api/attempts/:attemptId', requireRole('student'), ownedAttempt, asyncRoute(async (req, res) => {
+  let attempt = req.attempt;
+  if (!attempt.submitted_at && Number(attempt.expires_at) <= Date.now()) attempt = await finalizeAttempt(attempt);
+  res.json({ attempt: await attemptDto(attempt) });
+}));
+
+app.put('/api/attempts/:attemptId/answers', writeLimiter, requireRole('student'), ownedAttempt, asyncRoute(async (req, res) => {
+  const outcome = await withTransaction(async (client) => {
+    const attempt = await lockAttempt(client, req.attempt.id);
+    if (attempt.submitted_at) return { error: 'Jawaban sudah dikumpulkan dan tidak dapat diubah.', status: 409 };
+    if (Number(attempt.expires_at) <= Date.now()) {
+      return { error: 'Waktu ujian sudah habis.', status: 409, attempt: await finalizeLockedAttempt(client, attempt) };
     }
-  }
-  db.prepare('UPDATE attempts SET answers_json = ? WHERE id = ? AND submitted_at IS NULL').run(JSON.stringify(answers), attempt.id);
-  res.json({ ok: true, savedAt: Date.now() });
-});
-
-app.post('/api/attempts/:attemptId/submit', writeLimiter, requireRole('student'), ownedAttempt, (req, res) => {
-  let attempt = req.attempt;
-  if (!attempt.submitted_at && attempt.expires_at > Date.now() && req.body.answers && typeof req.body.answers === 'object' && !Array.isArray(req.body.answers)) {
-    const questions = questionRows(attempt.exam_id);
     const answers = req.body.answers;
-    const valid = Object.entries(answers).every(([indexText, selected]) => {
+    if (!answers || typeof answers !== 'object' || Array.isArray(answers)) return { error: 'Format jawaban tidak valid.', status: 400 };
+    const questions = await questionRows(attempt.exam_id, client);
+    for (const [indexText, selected] of Object.entries(answers)) {
       const index = Number(indexText);
-      return Number.isInteger(index) && index >= 0 && index < questions.length && Number.isInteger(selected) && selected >= 0 && selected < JSON.parse(questions[index].options_json).length;
-    });
-    if (!valid) return badRequest(res, 'Pilihan jawaban tidak valid.');
-    db.prepare('UPDATE attempts SET answers_json = ? WHERE id = ? AND submitted_at IS NULL').run(JSON.stringify(answers), attempt.id);
-    attempt = db.prepare('SELECT * FROM attempts WHERE id = ?').get(attempt.id);
-  }
-  if (!attempt.submitted_at) attempt = finalizeAttempt(attempt);
-  res.json({ attempt: attemptDto(attempt) });
-});
+      if (!Number.isInteger(index) || index < 0 || index >= questions.length || !Number.isInteger(selected) || selected < 0 || selected >= JSON.parse(questions[index].options_json).length) {
+        return { error: 'Pilihan jawaban tidak valid.', status: 400 };
+      }
+    }
+    await client.query('UPDATE attempts SET answers_json = $1 WHERE id = $2', [JSON.stringify(answers), attempt.id]);
+    return { ok: true, savedAt: Date.now() };
+  });
+  if (outcome.error) return res.status(outcome.status).json({ error: outcome.error, ...(outcome.attempt ? { attempt: await attemptDto(outcome.attempt) } : {}) });
+  return res.json(outcome);
+}));
+
+app.post('/api/attempts/:attemptId/submit', writeLimiter, requireRole('student'), ownedAttempt, asyncRoute(async (req, res) => {
+  const outcome = await withTransaction(async (client) => {
+    let attempt = await lockAttempt(client, req.attempt.id);
+    if (!attempt.submitted_at && Number(attempt.expires_at) > Date.now() && req.body.answers && typeof req.body.answers === 'object' && !Array.isArray(req.body.answers)) {
+      const questions = await questionRows(attempt.exam_id, client);
+      const answers = req.body.answers;
+      const valid = Object.entries(answers).every(([indexText, selected]) => {
+        const index = Number(indexText);
+        return Number.isInteger(index) && index >= 0 && index < questions.length && Number.isInteger(selected) && selected >= 0 && selected < JSON.parse(questions[index].options_json).length;
+      });
+      if (!valid) return { error: 'Pilihan jawaban tidak valid.', status: 400 };
+      const updated = await client.query('UPDATE attempts SET answers_json = $1 WHERE id = $2 RETURNING *', [JSON.stringify(answers), attempt.id]);
+      attempt = updated.rows[0];
+    }
+    if (!attempt.submitted_at) attempt = await finalizeLockedAttempt(client, attempt);
+    return { attempt };
+  });
+  if (outcome.error) return badRequest(res, outcome.error, outcome.status);
+  return res.json({ attempt: await attemptDto(outcome.attempt) });
+}));
 
 app.use((_req, res) => res.status(404).json({ error: 'Rute tidak ditemukan.' }));
 app.use((error, _req, res, _next) => {
@@ -456,7 +499,24 @@ app.use((error, _req, res, _next) => {
   res.status(500).json({ error: 'Terjadi kesalahan pada server.' });
 });
 
-app.listen(port, () => {
-  console.log(`ExamEdu API listening on http://localhost:${port}`);
-  console.log(`Database: ${databasePath}`);
+let server;
+async function start() {
+  await migrate();
+  server = app.listen(port, host, () => {
+    console.log(`ExamEdu API listening on port ${port}`);
+    console.log('Database: PostgreSQL');
+  });
+}
+
+async function shutdown() {
+  if (server) await new Promise((resolve) => server.close(resolve));
+  await pool.end();
+}
+
+process.on('SIGTERM', () => { shutdown().finally(() => process.exit(0)); });
+process.on('SIGINT', () => { shutdown().finally(() => process.exit(0)); });
+
+start().catch((error) => {
+  console.error('Failed to start ExamEdu API:', error);
+  pool.end().finally(() => process.exit(1));
 });

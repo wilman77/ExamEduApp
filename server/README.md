@@ -1,33 +1,48 @@
 # ExamEdu API
 
-API Node.js + SQLite untuk **ExamEduApp** (pengajar) dan **ExamPortalApp** (siswa). Database dibuat otomatis pada `data/examedu.sqlite`. Akun, ujian, soal, sesi, jawaban, dan nilai disimpan server-side.
+API Node.js untuk **ExamEduApp** (pengajar) dan **ExamPortalApp** (siswa). Penyimpanan memakai PostgreSQL; skema dibuat otomatis saat server mulai dari `migrations/001_initial.sql`. Backend tidak lagi memakai SQLite.
 
 ## Menjalankan lokal
 
-Persyaratan: Node.js 20 atau lebih baru.
+Persyaratan: Node.js 20 atau lebih baru dan database PostgreSQL.
 
 ```bash
 cd server
 npm install
 cp .env.example .env
-# Ubah TEACHER_SIGNUP_CODE menjadi kode undangan privat.
+# Isi DATABASE_URL dengan koneksi PostgreSQL; jangan commit file .env.
 npm run dev
 ```
 
-Di terminal lain, jalankan front-end ExamEduApp (`npm run dev`, default port 5173) dan ExamPortalApp (`npm run dev -- --port 5174`). Kedua server Vite meneruskan `/api` ke port 8787. Guru mendaftar dengan kode undangan yang sama persis dengan `TEACHER_SIGNUP_CODE`; siswa dapat membuat akun tanpa kode.
+Untuk Supabase, gunakan URL dari **Connect → Session pooler** (port 5432) sebagai `DATABASE_URL`. Jika kata sandi memiliki karakter khusus, gunakan URL-encoding. Pastikan `DATABASE_SSL=true`. Server menjalankan migrasi skema versi 1 saat startup.
 
-## Konfigurasi
+Di terminal lain, jalankan kedua frontend (`npm run dev`; ExamPortalApp dapat memakai port 5174). Atur `VITE_API_URL` pada build frontend ke URL backend; saat pengembangan lokal, kosongkan agar Vite memakai proxy `/api` ke port 8787. Guru mendaftar dengan `TEACHER_SIGNUP_CODE`; siswa dapat membuat akun tanpa kode.
 
-`PORT` menentukan port API; `DATABASE_PATH` menentukan file SQLite. `APP_ORIGINS` adalah daftar origin browser yang diizinkan, dipisah koma. Pada deployment, ganti dengan origin resmi kedua aplikasi. `TEACHER_SIGNUP_CODE` wajib disetel untuk mengaktifkan registrasi guru; jangan taruh nilainya di kode front-end atau repositori. Atur sebagai secret environment pada host backend.
+## Konfigurasi produksi
 
-Cookie sesi bersifat `HttpOnly`, berlaku 7 hari, dan memakai `SameSite=Lax` secara default. Bila API dan aplikasi berada pada site berbeda, semuanya harus memakai HTTPS dan konfigurasi `COOKIE_SAMESITE=none` serta `COOKIE_SECURE=true`; browser pihak ketiga masih dapat memblokir cookie lintas-site, jadi sebaiknya gunakan domain/site yang sama atau reverse proxy `/api` ke API.
+Atur variabel di platform hosting, bukan di repositori:
 
-## Fitur yang tersedia
+- `DATABASE_URL`: koneksi PostgreSQL Supabase, simpan sebagai secret.
+- `DATABASE_SSL=true` dan `NODE_ENV=production`.
+- `APP_ORIGINS`: daftar origin persis aplikasi guru dan siswa, dipisahkan koma. Jangan gunakan `*` karena cookie memakai kredensial.
+- `TEACHER_SIGNUP_CODE`: kode undangan privat yang panjang; jangan taruh di kode frontend.
+- `COOKIE_SECURE=true` untuk HTTPS. `COOKIE_SAMESITE=lax` cocok jika aplikasi dan API berada pada site yang sama. `none` hanya bila memang lintas-site, harus dipasangkan dengan HTTPS, dan sebagian browser dapat memblokir cookie pihak ketiga.
+- `PORT` disediakan oleh Render.
 
-- Pendaftaran dan login role `teacher`/`student`; password di-hash dengan `scrypt`, sesi disimpan di SQLite dan cookie tidak dapat dibaca JavaScript.
-- Guru hanya dapat melihat dan mengelola ujian miliknya. Pembuatan ujian menyertakan 1–30 soal pilihan ganda, lalu ujian diterbitkan secara eksplisit.
-- Siswa hanya melihat ujian terbit, memulai satu percobaan per ujian, menyimpan progres ke server, dan melihat kunci/pembahasan setelah dikumpulkan.
-- Timer ditetapkan server berdasarkan durasi; skor dihitung server-side. API membatasi permintaan login dan penulisan.
+Backend menjalankan satu instance dan membatasi koneksi PostgreSQL (`PG_POOL_SIZE`, default 5). Gunakan session pooler, bukan transaction pooler, untuk backend persisten ini.
+
+## Batas paket gratis
+
+Konfigurasi Render Free + Supabase Free cocok untuk uji coba, bukan layanan ujian produksi yang kritis. Render Free dapat tidur setelah 15 menit tanpa trafik dan butuh sekitar satu menit untuk aktif kembali; filesystem-nya sementara, jadi data aplikasi wajib disimpan di PostgreSQL. Supabase Free menyediakan kuota database terbatas dan dapat menjeda proyek setelah sekitar satu minggu aktivitas database rendah. Tidak ada backup otomatis di paket ini; pantau status proyek dan ekspor cadangan secara berkala. Jangan meningkatkan paket atau mengaktifkan add-on berbayar tanpa persetujuan pemilik.
+
+Tidak ada file SQLite lokal di repo saat migrasi ini, sehingga yang dibuat adalah skema PostgreSQL kosong; tidak ada akun/ujian lokal yang perlu diimpor. Jika ada database SQLite dari lingkungan lain, data tersebut memerlukan proses ekspor-impor tersendiri sebelum digunakan.
+
+## Fitur
+
+- Pendaftaran/login role `teacher`/`student`; password di-hash dengan `scrypt`, sesi disimpan di PostgreSQL, cookie bersifat `HttpOnly`.
+- Guru hanya melihat dan mengelola ujian miliknya.
+- Siswa melihat ujian terbit, memulai satu percobaan per ujian, menyimpan progres, dan melihat kunci/pembahasan setelah dikumpulkan.
+- Timer dan penilaian ditetapkan server-side; endpoint login dan penulisan dibatasi.
 
 ## Endpoint
 
@@ -36,10 +51,6 @@ Cookie sesi bersifat `HttpOnly`, berlaku 7 hari, dan memakai `SameSite=Lax` seca
 - `GET /api/exams`; `POST /api/exams`; `POST /api/exams/:examId/publish`
 - `POST /api/exams/:examId/attempts`; `GET /api/attempts/:attemptId`; `PUT /api/attempts/:attemptId/answers`; `POST /api/attempts/:attemptId/submit`
 
-## Catatan produksi
-
-Ini backend self-hosted yang siap dijalankan, **belum dipasang atau dideploy pada hosting publik**. Sebelum ujian resmi: gunakan HTTPS dan domain tepercaya, setel `APP_ORIGINS`/secret pada platform hosting, siapkan backup SQLite dan pemantauan, tinjau kebijakan retensi data, dan lakukan uji beban serta uji keamanan. Backend ini menyediakan penyimpanan dan penilaian dasar; bukan sistem pengawasan/anti-kecurangan atau pemenuhan regulasi pendidikan tertentu.
-
 ## Batasan akses kelas
 
-Saat ini setiap akun siswa yang terdaftar dapat melihat semua ujian terbit. Field kelas pada ujian hanya label; backend belum memiliki roster, penugasan siswa, atau kode enrollment per kelas. Jangan menerbitkan materi/ujian yang harus dirahasiakan dari kelas lain sampai pembatasan akses dan proses enrollment ditambahkan.
+Saat ini setiap akun siswa terdaftar dapat melihat semua ujian terbit. Field kelas pada ujian hanya label; backend belum memiliki roster, penugasan siswa, atau kode enrollment per kelas. Jangan menerbitkan materi/ujian yang harus dirahasiakan dari kelas lain sampai pembatasan akses dan proses enrollment ditambah.

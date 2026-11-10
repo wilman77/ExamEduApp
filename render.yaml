@@ -1,0 +1,29 @@
+services:
+  - type: web
+    name: examedu-api
+    runtime: node
+    plan: free
+    region: singapore
+    rootDir: server
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: '22'
+      - key: DATABASE_SSL
+        value: 'true'
+      - key: PG_POOL_SIZE
+        value: '5'
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_ORIGINS
+        sync: false
+      - key: TEACHER_SIGNUP_CODE
+        generateValue: true
+      - key: COOKIE_SECURE
+        value: 'true'
+      - key: COOKIE_SAMESITE
+        value: none
