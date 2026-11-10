@@ -171,15 +171,20 @@ function App() {
     void (async () => {
       try {
         const response = await api.workspace();
+        if (cancelled) return;
         let loaded = normalizeWorkspace(response.workspace);
         if (!loaded) {
-          const legacy = readLocalWorkspace(user.id) ?? DEFAULT_WORKSPACE;
-          const initialized = await api.initializeWorkspace(legacy);
-          loaded = normalizeWorkspace(initialized.workspace) ?? legacy;
+          const legacy = readLocalWorkspace(user.id);
+          if (legacy) {
+            const initialized = await api.initializeWorkspace(legacy);
+            loaded = normalizeWorkspace(initialized.workspace) ?? legacy;
+          }
         }
         if (cancelled) return;
-        setWorkspace(loaded);
-        writeLocalWorkspace(user.id, loaded);
+        setWorkspace(loaded ?? DEFAULT_WORKSPACE);
+        // Jangan menjadikan nilai bawaan di browser baru sebagai cache lama.
+        // Biarkan perangkat dengan pengaturan asli melakukan migrasi lebih dulu.
+        if (loaded) writeLocalWorkspace(user.id, loaded);
         setWorkspaceSyncError('');
       } catch (error) {
         if (cancelled) return;
