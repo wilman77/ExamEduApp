@@ -31,12 +31,18 @@ Persyaratan: Node.js 20 atau lebih baru dan PostgreSQL.
 
 Vite meneruskan `/api` ke `http://localhost:8787`. Panduan API lokal ada di [server/README.md](server/README.md), dan panduan API produksi ada di [supabase/README.md](supabase/README.md).
 
-## Fitur yang terhubung
+## Database produksi dan fitur
+
+Pada database Supabase baru jalankan berurutan migration `server/migrations/001_initial.sql` sampai `005_question_collections.sql`. Untuk database lama, jalankan hanya migration yang belum diterapkan satu kali melalui SQL Editor; migration tersebut non-destruktif. Backend produksi mempertahankan sesi cookie HttpOnly, CORS exact-origin, TLS CA, transaksi, grading, dan timer server.
+
+Fitur yang terhubung:
 
 - Registrasi/masuk pengajar dengan kode undangan, sesi cookie HttpOnly, dan logout.
-- Membuat ujian berisi 1–30 soal pilihan ganda, menyimpan draft, lalu menerbitkan untuk siswa.
-- Daftar ujian, statistik peserta, dan nilai yang dibaca dari server.
-- Akun, soal, sesi, jawaban, dan hasil tersimpan di PostgreSQL.
+- Membuat, menyimpan, dan menerbitkan ujian berisi 1–50 soal pilihan ganda dengan 4 atau 5 pilihan.
+- Gambar soal JPG/PNG/WebP diproses client menjadi JPEG sebelum dikirim; API hanya menyimpan data URL JPEG base64 valid hingga 115.000 karakter. Body JSON maksimum 6 MiB; permintaan yang terlalu besar ditolak dengan HTTP 413.
+- Workspace guru melalui API, dengan `POST` create-if-absent untuk seed satu kali dari cache legacy dan `PUT` untuk pembaruan berikutnya.
+- Bank soal nyata: buat, edit, hapus, lihat detail, dan salin koleksi ke ujian. Import `.xlsx` dilakukan client-side memakai template; gambar yang tertanam di Excel tidak ikut diimpor dan dapat diunggah ulang setelahnya.
+- Daftar ujian, statistik peserta, dan nilai yang dibaca dari server. Akun, soal, gambar, sesi, jawaban, dan hasil tersimpan di PostgreSQL.
 
 ## Deployment Cloudflare Pages
 
@@ -48,6 +54,6 @@ Set runtime variable `API_ORIGIN` ke `https://yzntkqprdubjmkhzvmad.supabase.co/f
 
 ## Batasan yang diketahui
 
-Bank soal terpisah dan beberapa pengaturan workspace masih contoh/placeholder. Paket gratis memiliki kuota dan proyek Supabase dapat dijeda karena tidak aktif; setup ini tidak ditujukan untuk ujian kritis. Siapkan backup, kebijakan retensi, dan pengujian keamanan sebelum penggunaan resmi. Aplikasi bukan sistem proctoring atau anti-kecurangan.
+Paket gratis memiliki kuota dan proyek Supabase dapat dijeda karena tidak aktif; setup ini tidak ditujukan untuk ujian kritis. Siapkan backup, kebijakan retensi, dan pengujian keamanan sebelum penggunaan resmi. Aplikasi bukan sistem proctoring atau anti-kecurangan.
 
 > **Akses kelas:** semua siswa terdaftar saat ini dapat melihat semua ujian terbit. Kelas pada form masih label, bukan pembatas akses. Jangan membagikan ujian rahasia per kelas sebelum roster/enrollment ditambahkan.

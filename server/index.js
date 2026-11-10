@@ -80,7 +80,7 @@ if (sameSite === 'none' && !secureCookie) throw new Error('COOKIE_SAMESITE=none 
 const app = express();
 if (isProduction) app.set('trust proxy', 1);
 app.disable('x-powered-by');
-app.use(express.json({ limit: '100kb' }));
+app.use(express.json({ limit: '6mb' }));
 app.use(cookieParser());
 app.use((req, res, next) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -95,7 +95,7 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Vary', 'Origin');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Exam-Role');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
   }
   if (req.method === 'OPTIONS') return res.sendStatus(204);
   next();
@@ -137,6 +137,57 @@ function makePasswordHash(password, salt) {
 
 function publicUser(row) {
   return { id: row.id, name: row.name, email: row.email, role: row.role };
+}
+
+function normalizeWorkspaceInput(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'Format workspace tidak valid.' };
+  const name = typeof body.name === 'string' ? body.name.trim() : '';
+  if (!name || name.length > 80) return { error: 'Nama workspace wajib diisi (1 sampai 80 karakter).' };
+  const lists = {};
+  for (const key of ['subjects', 'classes']) {
+    if (!Array.isArray(body[key]) || body[key].length < 1 || body[key].length > 100) return { error: `${key} harus berisi 1 sampai 100 item.` };
+    const values = body[key].map((value) => typeof value === 'string' ? value.trim() : '');
+    if (values.some((value) => !value || value.length > 80)) return { error: `Setiap item ${key} harus berupa teks 1 sampai 80 karakter.` };
+    const folded = values.map((value) => value.toLocaleLowerCase('id-ID'));
+    if (new Set(folded).size !== folded.length) return { error: `Item ${key} tidak boleh duplikat.` };
+    lists[key] = values;
+  }
+  return { value: { name, subjects: lists.subjects, classes: lists.classes } };
+}
+
+function workspaceDto(row) {
+  return { name: row.name, subjects: row.subjects, classes: row.classes };
+}
+
+function validateImageData(value, index) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value !== 'string' || value.length > 115000) return `Gambar soal ${index + 1} tidak valid atau terlalu besar.`;
+  const match = /^data:image\/jpeg;base64,([A-Za-z0-9+/]*={0,2})$/.exec(value);
+  if (!match || match[1].length % 4 !== 0) return `Gambar soal ${index + 1} harus berupa data URL JPEG base64 yang valid.`;
+  const bytes = Buffer.from(match[1], 'base64');
+  if (bytes.length < 4 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[bytes.length - 2] !== 0xff || bytes[bytes.length - 1] !== 0xd9) return `Gambar soal ${index + 1} harus berupa JPEG yang valid.`;
+  return null;
+}
+
+function normalizeQuestionInput(question, index) {
+  if (!question || typeof question.prompt !== 'string' || !question.prompt.trim() || question.prompt.trim().length > 1000) return { error: `Teks soal ${index + 1} wajib diisi (maksimal 1000 karakter).` };
+  if (!Array.isArray(question.options) || ![4, 5].includes(question.options.length) || question.options.some((option) => typeof option !== 'string' || !option.trim() || option.trim().length > 300)) return { error: `Soal ${index + 1} harus memiliki empat atau lima pilihan jawaban.` };
+  if (!Number.isInteger(question.answer) || question.answer < 0 || question.answer >= question.options.length) return { error: `Kunci jawaban soal ${index + 1} tidak valid.` };
+  if (typeof question.explanation !== 'string' || question.explanation.length > 1000) return { error: `Pembahasan soal ${index + 1} terlalu panjang.` };
+  const imageError = validateImageData(question.imageData, index);
+  if (imageError) return { error: imageError };
+  return { value: { prompt: question.prompt.trim(), options: question.options.map((option) => option.trim()), answer: question.answer, explanation: question.explanation.trim(), imageData: question.imageData === undefined || question.imageData === null || question.imageData === '' ? null : question.imageData } };
+}
+
+function normalizeQuestionList(questions) {
+  if (!Array.isArray(questions) || questions.length < 1 || questions.length > 50) return { error: 'Koleksi harus memiliki 1 sampai 50 soal.' };
+  const normalized = [];
+  for (const [index, question] of questions.entries()) {
+    const result = normalizeQuestionInput(question, index);
+    if (result.error) return result;
+    normalized.push(result.value);
+  }
+  return { value: normalized };
 }
 
 async function createSession(userId, executor = pool) {
@@ -258,6 +309,85 @@ app.post('/api/auth/logout', requireAuth, asyncRoute(async (req, res) => {
   res.json({ ok: true });
 }));
 
+app.get('/api/workspace', requireRole('teacher'), asyncRoute(async (req, res) => {
+  const result = await pool.query('SELECT name, subjects, classes FROM workspace_preferences WHERE user_id = $1', [req.user.id]);
+  return res.json({ workspace: result.rows[0] ? workspaceDto(result.rows[0]) : null });
+}));
+
+app.post('/api/workspace', writeLimiter, requireRole('teacher'), asyncRoute(async (req, res) => {
+  const normalized = normalizeWorkspaceInput(req.body);
+  if (normalized.error) return badRequest(res, normalized.error);
+  const now = Date.now();
+  const result = await pool.query(`INSERT INTO workspace_preferences (user_id, name, subjects, classes, updated_at)
+    VALUES ($1, $2, $3::jsonb, $4::jsonb, $5) ON CONFLICT (user_id) DO NOTHING
+    RETURNING name, subjects, classes`, [req.user.id, normalized.value.name, JSON.stringify(normalized.value.subjects), JSON.stringify(normalized.value.classes), now]);
+  if (result.rows[0]) return res.status(201).json({ workspace: workspaceDto(result.rows[0]), created: true });
+  const existing = await pool.query('SELECT name, subjects, classes FROM workspace_preferences WHERE user_id = $1', [req.user.id]);
+  return res.json({ workspace: workspaceDto(existing.rows[0]), created: false });
+}));
+
+app.put('/api/workspace', writeLimiter, requireRole('teacher'), asyncRoute(async (req, res) => {
+  const normalized = normalizeWorkspaceInput(req.body);
+  if (normalized.error) return badRequest(res, normalized.error);
+  const result = await pool.query(`INSERT INTO workspace_preferences (user_id, name, subjects, classes, updated_at)
+    VALUES ($1, $2, $3::jsonb, $4::jsonb, $5)
+    ON CONFLICT (user_id) DO UPDATE SET name = EXCLUDED.name, subjects = EXCLUDED.subjects, classes = EXCLUDED.classes, updated_at = EXCLUDED.updated_at
+    RETURNING name, subjects, classes`, [req.user.id, normalized.value.name, JSON.stringify(normalized.value.subjects), JSON.stringify(normalized.value.classes), Date.now()]);
+  return res.json({ workspace: workspaceDto(result.rows[0]) });
+}));
+
+function collectionDto(row, includeQuestions = false) {
+  const questions = Array.isArray(row.questions_json) ? row.questions_json : JSON.parse(row.questions_json || '[]');
+  return { id: row.id, title: row.title, subject: row.subject, questionCount: questions.length, updatedAt: Number(row.updated_at), ...(includeQuestions ? { questions } : {}) };
+}
+
+function normalizeCollectionInput(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return { error: 'Format koleksi tidak valid.' };
+  const title = typeof body.title === 'string' ? body.title.trim() : '';
+  const subject = typeof body.subject === 'string' ? body.subject.trim() : '';
+  if (!title || title.length > 160) return { error: 'Judul koleksi wajib diisi (maksimal 160 karakter).' };
+  if (!subject || subject.length > 100) return { error: 'Mata pelajaran wajib diisi (maksimal 100 karakter).' };
+  const questions = normalizeQuestionList(body.questions);
+  if (questions.error) return questions;
+  return { value: { title, subject, questions: questions.value } };
+}
+
+app.get('/api/question-collections', requireRole('teacher'), asyncRoute(async (req, res) => {
+  const result = await pool.query('SELECT id, title, subject, questions_json, updated_at FROM question_collections WHERE owner_id = $1 ORDER BY updated_at DESC, created_at DESC', [req.user.id]);
+  res.json({ collections: result.rows.map((row) => collectionDto(row)) });
+}));
+
+app.post('/api/question-collections', writeLimiter, requireRole('teacher'), asyncRoute(async (req, res) => {
+  const normalized = normalizeCollectionInput(req.body);
+  if (normalized.error) return badRequest(res, normalized.error);
+  const id = crypto.randomUUID();
+  const now = Date.now();
+  const result = await pool.query(`INSERT INTO question_collections (id, owner_id, title, subject, questions_json, created_at, updated_at)
+    VALUES ($1, $2, $3, $4, $5::jsonb, $6, $6) RETURNING id, title, subject, questions_json, updated_at`, [id, req.user.id, normalized.value.title, normalized.value.subject, JSON.stringify(normalized.value.questions), now]);
+  res.status(201).json({ collection: collectionDto(result.rows[0], true) });
+}));
+
+app.get('/api/question-collections/:collectionId', requireRole('teacher'), asyncRoute(async (req, res) => {
+  const result = await pool.query('SELECT id, title, subject, questions_json, updated_at FROM question_collections WHERE id = $1 AND owner_id = $2', [req.params.collectionId, req.user.id]);
+  if (!result.rows[0]) return badRequest(res, 'Koleksi tidak ditemukan.', 404);
+  res.json({ collection: collectionDto(result.rows[0], true) });
+}));
+
+app.put('/api/question-collections/:collectionId', writeLimiter, requireRole('teacher'), asyncRoute(async (req, res) => {
+  const normalized = normalizeCollectionInput(req.body);
+  if (normalized.error) return badRequest(res, normalized.error);
+  const result = await pool.query(`UPDATE question_collections SET title = $1, subject = $2, questions_json = $3::jsonb, updated_at = $4
+    WHERE id = $5 AND owner_id = $6 RETURNING id, title, subject, questions_json, updated_at`, [normalized.value.title, normalized.value.subject, JSON.stringify(normalized.value.questions), Date.now(), req.params.collectionId, req.user.id]);
+  if (!result.rows[0]) return badRequest(res, 'Koleksi tidak ditemukan.', 404);
+  res.json({ collection: collectionDto(result.rows[0], true) });
+}));
+
+app.delete('/api/question-collections/:collectionId', writeLimiter, requireRole('teacher'), asyncRoute(async (req, res) => {
+  const result = await pool.query('DELETE FROM question_collections WHERE id = $1 AND owner_id = $2', [req.params.collectionId, req.user.id]);
+  if (result.rowCount === 0) return badRequest(res, 'Koleksi tidak ditemukan.', 404);
+  res.json({ ok: true });
+}));
+
 app.get('/api/exams', requireAuth, asyncRoute(async (req, res) => {
   if (req.user.role === 'teacher') {
     const result = await pool.query(`SELECT e.*,
@@ -306,12 +436,14 @@ function validateExamInput(body) {
   if (!grade || grade.length > 100) return 'Kelas wajib diisi.';
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || Number.isNaN(Date.parse(`${date}T00:00:00Z`))) return 'Tanggal ujian tidak valid.';
   if (!Number.isInteger(duration) || duration < 1 || duration > 300) return 'Durasi ujian harus antara 1 dan 300 menit.';
-  if (!Array.isArray(body.questions) || body.questions.length < 1 || body.questions.length > 30) return 'Ujian harus memiliki 1 sampai 30 soal.';
+  if (!Array.isArray(body.questions) || body.questions.length < 1 || body.questions.length > 50) return 'Ujian harus memiliki 1 sampai 50 soal.';
   for (const [index, question] of body.questions.entries()) {
     if (!question || typeof question.prompt !== 'string' || !question.prompt.trim() || question.prompt.trim().length > 1000) return `Teks soal ${index + 1} wajib diisi (maksimal 1000 karakter).`;
     if (!Array.isArray(question.options) || ![4, 5].includes(question.options.length) || question.options.some((option) => typeof option !== 'string' || !option.trim() || option.trim().length > 300)) return `Soal ${index + 1} harus memiliki empat atau lima pilihan jawaban.`;
     if (!Number.isInteger(question.answer) || question.answer < 0 || question.answer >= question.options.length) return `Kunci jawaban soal ${index + 1} tidak valid.`;
     if (typeof question.explanation !== 'string' || question.explanation.length > 1000) return `Pembahasan soal ${index + 1} terlalu panjang.`;
+    const imageError = validateImageData(question.imageData, index);
+    if (imageError) return imageError;
   }
   return null;
 }
@@ -325,7 +457,8 @@ app.post('/api/exams', writeLimiter, requireRole('teacher'), asyncRoute(async (r
     await client.query(`INSERT INTO exams (id, owner_id, title, subject, grade, exam_date, duration_minutes, status, created_at)
       VALUES ($1, $2, $3, $4, $5, $6, $7, 'draft', $8)`, [examId, req.user.id, req.body.title.trim(), req.body.subject.trim(), req.body.grade.trim(), req.body.date, Number(req.body.duration), now]);
     for (const [index, question] of req.body.questions.entries()) {
-      await client.query('INSERT INTO questions (exam_id, position, prompt, options_json, answer_index, explanation) VALUES ($1, $2, $3, $4, $5, $6)', [examId, index, question.prompt.trim(), JSON.stringify(question.options.map((option) => option.trim())), question.answer, question.explanation.trim()]);
+      const imageData = question.imageData === undefined || question.imageData === null || question.imageData === '' ? null : question.imageData;
+      await client.query('INSERT INTO questions (exam_id, position, prompt, options_json, answer_index, explanation, image_data) VALUES ($1, $2, $3, $4, $5, $6, $7)', [examId, index, question.prompt.trim(), JSON.stringify(question.options.map((option) => option.trim())), question.answer, question.explanation.trim(), imageData]);
     }
   });
   return res.status(201).json({ exam: {
@@ -350,7 +483,7 @@ async function getExamForStudent(examId) {
 }
 
 async function questionRows(examId, executor = pool) {
-  const result = await executor.query('SELECT id, position, prompt, options_json, answer_index, explanation FROM questions WHERE exam_id = $1 ORDER BY position, id', [examId]);
+  const result = await executor.query('SELECT id, position, prompt, options_json, answer_index, explanation, image_data FROM questions WHERE exam_id = $1 ORDER BY position, id', [examId]);
   return result.rows;
 }
 
@@ -359,6 +492,7 @@ function listQuestions(rows, revealAnswers = false) {
     id: Number(question.id),
     prompt: question.prompt,
     options: JSON.parse(question.options_json),
+    imageData: question.image_data || null,
     ...(revealAnswers ? { answer: Number(question.answer_index), explanation: question.explanation } : {}),
   }));
 }
@@ -516,6 +650,7 @@ app.post('/api/attempts/:attemptId/submit', writeLimiter, requireRole('student')
 app.use((_req, res) => res.status(404).json({ error: 'Rute tidak ditemukan.' }));
 app.use((error, _req, res, _next) => {
   console.error('API error:', error);
+  if (error?.type === 'entity.too.large') return res.status(413).json({ error: 'Ukuran body terlalu besar.' });
   if (error?.type === 'entity.parse.failed') return res.status(400).json({ error: 'Format JSON tidak valid.' });
   res.status(500).json({ error: 'Terjadi kesalahan pada server.' });
 });
