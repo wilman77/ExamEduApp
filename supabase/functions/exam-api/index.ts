@@ -1,5 +1,6 @@
 import pg from "npm:pg@8.23.1";
 import crypto from "node:crypto";
+import { Buffer } from "node:buffer";
 import { SUPABASE_CA } from "./ca.ts";
 
 const { Pool } = pg;
