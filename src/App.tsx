@@ -11,6 +11,8 @@ import {
   Clock3,
   FileQuestion,
   LayoutDashboard,
+  LogOut,
+  LockKeyhole,
   MoreHorizontal,
   Plus,
   Search,
@@ -18,27 +20,11 @@ import {
   UsersRound,
   X,
 } from 'lucide-react';
+import { api, type ExamDto, type ExamInput, type QuestionInput, type User } from './api';
 
 type ExamStatus = 'Aktif' | 'Draft' | 'Selesai';
-type Exam = {
-  id: string;
-  title: string;
-  subject: string;
-  grade: string;
-  date: string;
-  duration: number;
-  status: ExamStatus;
-  participants: number;
-  color: string;
-};
+type Exam = Omit<ExamDto, 'status'> & { status: ExamStatus; color: string };
 type Page = 'Ringkasan' | 'Ujian' | 'Bank soal' | 'Analitik';
-
-const initialExams: Exam[] = [
-  { id: 'EX-104', title: 'Penilaian Akhir Semester', subject: 'Matematika', grade: 'Kelas IX A', date: '2026-11-12', duration: 90, status: 'Aktif', participants: 28, color: 'violet' },
-  { id: 'EX-103', title: 'Kuis Bab Sistem Pencernaan', subject: 'Biologi', grade: 'Kelas XI B', date: '2026-11-14', duration: 45, status: 'Draft', participants: 0, color: 'mint' },
-  { id: 'EX-102', title: 'Latihan Teks Eksplanasi', subject: 'Bahasa Indonesia', grade: 'Kelas VIII C', date: '2026-11-08', duration: 60, status: 'Selesai', participants: 31, color: 'peach' },
-  { id: 'EX-101', title: 'Ulangan Harian: Gerak', subject: 'Fisika', grade: 'Kelas X A', date: '2026-11-06', duration: 50, status: 'Selesai', participants: 26, color: 'blue' },
-];
 
 const navItems: { label: Page; icon: typeof LayoutDashboard }[] = [
   { label: 'Ringkasan', icon: LayoutDashboard },
@@ -47,13 +33,15 @@ const navItems: { label: Page; icon: typeof LayoutDashboard }[] = [
   { label: 'Analitik', icon: BarChart3 },
 ];
 
-function loadExams(): Exam[] {
-  try {
-    const stored = localStorage.getItem('examedu-exams');
-    return stored ? JSON.parse(stored) as Exam[] : initialExams;
-  } catch {
-    return initialExams;
-  }
+function colorForSubject(subject: string) {
+  if (/bio/i.test(subject)) return 'mint';
+  if (/bahasa indonesia/i.test(subject)) return 'peach';
+  if (/fisika|sejarah/i.test(subject)) return 'blue';
+  return 'violet';
+}
+
+function toExam(dto: ExamDto): Exam {
+  return { ...dto, status: dto.status === 'published' ? 'Aktif' : 'Draft', color: colorForSubject(dto.subject) };
 }
 
 function formatDate(value: string) {
@@ -62,14 +50,48 @@ function formatDate(value: string) {
 
 function App() {
   const [page, setPage] = useState<Page>('Ringkasan');
-  const [exams, setExams] = useState<Exam[]>(loadExams);
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+  const [authNotice, setAuthNotice] = useState('');
+  const [exams, setExams] = useState<Exam[]>([]);
+  const [dataLoading, setDataLoading] = useState(false);
   const [query, setQuery] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [toast, setToast] = useState('');
 
+  async function loadExams() {
+    setDataLoading(true);
+    try {
+      const response = await api.exams();
+      setExams(response.exams.map(toExam));
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Daftar ujian gagal dimuat.');
+    } finally {
+      setDataLoading(false);
+    }
+  }
+
   useEffect(() => {
-    localStorage.setItem('examedu-exams', JSON.stringify(exams));
-  }, [exams]);
+    let cancelled = false;
+    api.me().then(async ({ user: currentUser }) => {
+      if (cancelled) return;
+      if (currentUser && currentUser.role !== 'teacher') {
+        await api.logout().catch(() => undefined);
+        setAuthNotice('Sesi siswa sudah dikeluarkan. Masuk dengan akun pengajar.');
+        return;
+      }
+      setUser(currentUser);
+      if (currentUser) {
+        const response = await api.exams();
+        if (!cancelled) setExams(response.exams.map(toExam));
+      }
+    }).catch((error: unknown) => {
+      if (!cancelled) setAuthNotice(error instanceof Error ? error.message : 'Backend belum dapat dihubungi.');
+    }).finally(() => {
+      if (!cancelled) setAuthLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (!toast) return;
@@ -81,13 +103,34 @@ function App() {
     `${exam.title} ${exam.subject} ${exam.grade}`.toLowerCase().includes(query.toLowerCase()),
   ), [exams, query]);
 
-  const createExam = (exam: Omit<Exam, 'id' | 'status' | 'participants' | 'color'>) => {
-    const newExam: Exam = { ...exam, id: `EX-${Math.floor(100 + Math.random() * 900)}`, status: 'Draft', participants: 0, color: 'violet' };
-    setExams((current) => [newExam, ...current]);
+  async function createExam(input: ExamInput) {
+    const response = await api.createExam(input);
+    setExams((current) => [toExam(response.exam), ...current]);
     setPage('Ujian');
-    setToast('Ujian baru berhasil disimpan sebagai draft.');
-  };
+    setToast('Ujian tersimpan sebagai draft. Terbitkan dari daftar ujian agar siswa dapat melihatnya.');
+  }
 
+  async function publishExam(id: string) {
+    try {
+      await api.publishExam(id);
+      await loadExams();
+      setToast('Ujian berhasil diterbitkan untuk siswa.');
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : 'Ujian gagal diterbitkan.');
+    }
+  }
+
+  async function logout() {
+    try { await api.logout(); } catch { /* sesi di sisi server mungkin sudah kedaluwarsa */ }
+    setUser(null);
+    setExams([]);
+    setAuthNotice('Anda sudah keluar dari akun.');
+  }
+
+  if (authLoading) return <div className="app-loading"><span className="brand-mark"><ClipboardList size={20} /></span><b>Memeriksa sesi pengajar…</b></div>;
+  if (!user) return <AuthScreen notice={authNotice} onAuthenticated={(nextUser) => { setUser(nextUser); setAuthNotice(''); void loadExams(); }} />;
+
+  const initials = user.name.trim().split(/\s+/).slice(0, 2).map((part) => part[0]?.toUpperCase() || '').join('');
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -120,8 +163,8 @@ function App() {
         </div>
 
         <div className="sidebar-bottom">
-          <button className="nav-item" onClick={() => setToast('Pengaturan workspace demo belum tersedia.')}><Settings size={18} /><span>Pengaturan</span></button>
-          <div className="profile-row"><div className="profile-avatar">NA</div><div className="profile-copy"><b>Nadia Aulia</b><small>Pengajar</small></div><MoreHorizontal size={18} className="muted-icon" /></div>
+          <button className="nav-item" onClick={() => setToast('Pengaturan workspace akan ditambahkan kemudian.')}><Settings size={18} /><span>Pengaturan</span></button>
+          <div className="profile-row"><div className="profile-avatar">{initials || 'PG'}</div><div className="profile-copy"><b>{user.name}</b><small>Pengajar</small></div><button className="logout-icon" aria-label="Keluar" title="Keluar" onClick={() => void logout()}><LogOut size={16} /></button></div>
         </div>
       </aside>
 
@@ -133,13 +176,14 @@ function App() {
             <label className="global-search"><Search size={16} /><input aria-label="Cari ujian" placeholder="Cari ujian..." value={query} onChange={(event) => setQuery(event.target.value)} /><kbd>⌘ K</kbd></label>
             <button className="icon-button notification-button" aria-label="Notifikasi" onClick={() => setToast('Tidak ada notifikasi baru.')}><Bell size={18} /><i /></button>
             <div className="topbar-divider" />
-            <button className="teacher-menu" onClick={() => setToast('Anda masuk sebagai Nadia Aulia.')}><span className="profile-avatar small">NA</span><ChevronDown size={15} /></button>
+            <button className="teacher-menu" onClick={() => void logout()} title="Keluar"><span className="profile-avatar small">{initials || 'PG'}</span><LogOut size={15} /></button>
           </div>
         </header>
 
         <div className="page-content">
-          {page === 'Ringkasan' && <Dashboard exams={filteredExams} onCreate={() => setIsModalOpen(true)} onOpenExams={() => setPage('Ujian')} />}
-          {page === 'Ujian' && <ExamList exams={filteredExams} onCreate={() => setIsModalOpen(true)} />}
+          {dataLoading && <div className="inline-loading">Memuat data dari server…</div>}
+          {page === 'Ringkasan' && <Dashboard exams={filteredExams} allExams={exams} onCreate={() => setIsModalOpen(true)} onOpenExams={() => setPage('Ujian')} onPublish={publishExam} />}
+          {page === 'Ujian' && <ExamList exams={filteredExams} onCreate={() => setIsModalOpen(true)} onPublish={publishExam} />}
           {page === 'Bank soal' && <QuestionBank onToast={setToast} />}
           {page === 'Analitik' && <Analytics exams={exams} />}
         </div>
@@ -151,50 +195,105 @@ function App() {
   );
 }
 
+function AuthScreen({ notice, onAuthenticated }: { notice: string; onAuthenticated: (user: User) => void }) {
+  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
+  const [error, setError] = useState('');
+  const [working, setWorking] = useState(false);
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError('');
+    setWorking(true);
+    try {
+      const response = mode === 'login'
+        ? await api.login(email, password)
+        : await api.register(name, email, password, inviteCode);
+      onAuthenticated(response.user);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Tidak dapat memproses akun.');
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return <main className="auth-shell teacher-auth">
+    <section className="auth-card">
+      <div className="auth-brand"><span className="brand-mark"><ClipboardList size={21} /></span><span>exam<span>edu</span><small>TEACHER SPACE</small></span></div>
+      <p className="auth-eyebrow">AKSES PENGAJAR</p>
+      <h1>{mode === 'login' ? 'Selamat datang kembali' : 'Buat akun pengajar'}</h1>
+      <p className="auth-description">Masuk untuk mengelola ujian dan melihat progres siswa dari satu tempat.</p>
+      {notice && <div className="auth-notice">{notice}</div>}
+      <form onSubmit={(event) => void submit(event)} className="auth-form">
+        {mode === 'register' && <label>Nama lengkap<input value={name} onChange={(event) => setName(event.target.value)} autoComplete="name" required maxLength={100} placeholder="Nama Anda" /></label>}
+        <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} autoComplete="email" required placeholder="nama@sekolah.id" /></label>
+        <label>Kata sandi<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} required minLength={mode === 'register' ? 10 : 1} maxLength={200} placeholder={mode === 'register' ? 'Minimal 10 karakter' : 'Kata sandi Anda'} /></label>
+        {mode === 'register' && <label>Kode undangan pengajar<input value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} autoComplete="off" required placeholder="Kode dari administrator" /></label>}
+        {error && <p className="auth-error" role="alert">{error}</p>}
+        <button className="auth-submit" disabled={working}>{working ? 'Memproses…' : mode === 'login' ? 'Masuk ke panel' : 'Daftar sebagai pengajar'} <ArrowUpRight size={16} /></button>
+      </form>
+      <p className="auth-switch">{mode === 'login' ? 'Belum punya akun pengajar?' : 'Sudah punya akun?'} <button onClick={() => { setMode(mode === 'login' ? 'register' : 'login'); setError(''); }}>{mode === 'login' ? 'Daftar' : 'Masuk'}</button></p>
+      <div className="auth-security"><LockKeyhole size={15} /> Sesi terenkripsi di cookie yang tidak dapat dibaca skrip halaman.</div>
+    </section>
+  </main>;
+}
+
 function PageHeading({ eyebrow, title, description, action }: { eyebrow: string; title: string; description: string; action?: React.ReactNode }) {
   return <div className="page-heading"><div><p className="eyebrow">{eyebrow}</p><h1>{title}</h1><p className="heading-description">{description}</p></div>{action}</div>;
 }
 
-function Dashboard({ exams, onCreate, onOpenExams }: { exams: Exam[]; onCreate: () => void; onOpenExams: () => void }) {
-  const activeCount = exams.filter((exam) => exam.status === 'Aktif').length;
+function Dashboard({ exams, allExams, onCreate, onOpenExams, onPublish }: { exams: Exam[]; allExams: Exam[]; onCreate: () => void; onOpenExams: () => void; onPublish: (id: string) => void }) {
+  const activeCount = allExams.filter((exam) => exam.status === 'Aktif').length;
+  const totalParticipants = allExams.reduce((sum, exam) => sum + exam.participants, 0);
+  const totalSubmissions = allExams.reduce((sum, exam) => sum + exam.submissionCount, 0);
+  const scoreCount = allExams.reduce((sum, exam) => sum + (exam.averageScore === null ? 0 : exam.submissionCount), 0);
+  const weightedScore = scoreCount ? allExams.reduce((sum, exam) => sum + (exam.averageScore ?? 0) * exam.submissionCount, 0) / scoreCount : null;
+  const completionRate = totalParticipants ? Math.round((totalSubmissions / totalParticipants) * 100) : 0;
+  const chartExams = allExams.slice(0, 7);
   return <>
-    <PageHeading eyebrow="SELASA, 10 NOVEMBER 2026" title="Selamat pagi, Nadia 👋" description="Ini ringkasan aktivitas ujian di kelasmu." action={<button className="primary-button" onClick={onCreate}><Plus size={17} /> Buat ujian</button>} />
+    <PageHeading eyebrow="PANEL PENGAJAR" title="Ringkasan ujian" description="Ikhtisar ujian dan aktivitas siswa dari data server." action={<button className="primary-button" onClick={onCreate}><Plus size={17} /> Buat ujian</button>} />
     <section className="stat-grid" aria-label="Ringkasan statistik">
-      <StatCard label="Total ujian" value={String(exams.length).padStart(2, '0')} note="di workspace kamu" icon={<ClipboardList />} tone="lavender" trend="+2 bulan ini" />
-      <StatCard label="Sedang aktif" value={String(activeCount).padStart(2, '0')} note="ujian berlangsung" icon={<Clock3 />} tone="mint" trend="Lihat jadwal" />
-      <StatCard label="Total peserta" value="128" note="dari 6 kelas" icon={<UsersRound />} tone="peach" trend="+12 minggu ini" />
-      <StatCard label="Rata-rata nilai" value="82,4" note="semua penilaian" icon={<BarChart3 />} tone="sky" trend="+4,8% semester ini" />
+      <StatCard label="Total ujian" value={String(allExams.length).padStart(2, '0')} note="tersimpan di server" icon={<ClipboardList />} tone="lavender" trend="Lihat ujian" />
+      <StatCard label="Sedang aktif" value={String(activeCount).padStart(2, '0')} note="sudah diterbitkan" icon={<Clock3 />} tone="mint" trend="Lihat jadwal" />
+      <StatCard label="Total peserta" value={String(totalParticipants)} note="percobaan ujian" icon={<UsersRound />} tone="peach" trend={`${totalSubmissions} terkumpul`} />
+      <StatCard label="Rata-rata nilai" value={weightedScore === null ? '—' : weightedScore.toLocaleString('id-ID', { maximumFractionDigits: 1 })} note="ujian terkumpul" icon={<BarChart3 />} tone="sky" trend={scoreCount ? `${scoreCount} hasil dinilai` : 'Belum ada hasil'} />
     </section>
 
     <section className="overview-grid">
       <div className="panel upcoming-panel">
-        <div className="panel-heading"><div><h2>Jadwal mendatang</h2><p>Ujian yang perlu kamu siapkan</p></div><button className="text-button" onClick={onOpenExams}>Lihat semua <ArrowUpRight size={15} /></button></div>
+        <div className="panel-heading"><div><h2>Jadwal mendatang</h2><p>Ujian draft dan ujian yang akan datang</p></div><button className="text-button" onClick={onOpenExams}>Lihat semua <ArrowUpRight size={15} /></button></div>
         <div className="schedule-list">
-          {exams.filter((exam) => exam.status !== 'Selesai').slice(0, 3).map((exam) => <div className="schedule-item" key={exam.id}>
+          {exams.filter((exam) => exam.status !== 'Selesai').slice(0, 4).map((exam) => <div className="schedule-item" key={exam.id}>
             <div className="date-tile"><b>{new Date(`${exam.date}T00:00:00`).getDate()}</b><small>{new Intl.DateTimeFormat('id-ID', { month: 'short' }).format(new Date(`${exam.date}T00:00:00`))}</small></div>
             <div className={`subject-mark ${exam.color}`}><BookOpen size={17} /></div>
             <div className="schedule-copy"><b>{exam.title}</b><small>{exam.subject} <span>·</span> {exam.grade}</small></div>
             <span className={`status-pill ${exam.status.toLowerCase()}`}>{exam.status}</span>
-            <button className="more-button" aria-label={`Opsi ${exam.title}`}><MoreHorizontal size={18} /></button>
+            <button className="more-button" aria-label={`Opsi ${exam.title}`} onClick={onOpenExams}><MoreHorizontal size={18} /></button>
           </div>)}
-          {exams.filter((exam) => exam.status !== 'Selesai').length === 0 && <div className="empty-state">Belum ada ujian mendatang.</div>}
+          {exams.filter((exam) => exam.status !== 'Selesai').length === 0 && <div className="empty-state">Belum ada ujian. Buat ujian dan terbitkan untuk menampilkannya di portal siswa.</div>}
         </div>
       </div>
       <div className="panel activity-panel">
-        <div className="panel-heading"><div><h2>Aktivitas kelas</h2><p>Partisipasi peserta minggu ini</p></div><button className="period-select" onClick={() => {}}>7 hari <ChevronDown size={14} /></button></div>
-        <div className="chart-summary"><b>84%</b><span className="trend-positive">↗ 8,2%</span><small>tingkat penyelesaian</small></div>
-        <div className="mini-chart" aria-label="Grafik aktivitas Senin sampai Minggu">
-          {[45, 64, 52, 82, 68, 100, 73].map((height, index) => <div className="chart-column" key={index}><div className={index === 5 ? 'bar active-bar' : 'bar'} style={{ height: `${height}%` }} /><small>{['S', 'S', 'R', 'K', 'J', 'S', 'M'][index]}</small></div>)}
-        </div>
+        <div className="panel-heading"><div><h2>Pengumpulan jawaban</h2><p>Untuk semua ujian di workspace</p></div><span className="period-select">Data server</span></div>
+        <div className="chart-summary"><b>{completionRate}%</b><small>percobaan sudah dikumpulkan</small></div>
+        {chartExams.length > 0 ? <div className="mini-chart" aria-label="Tingkat pengumpulan per ujian">
+          {chartExams.map((exam, index) => {
+            const percent = exam.participants ? Math.round((exam.submissionCount / exam.participants) * 100) : 0;
+            return <div className="chart-column" key={exam.id} title={`${exam.title}: ${percent}%`}><div className={index === 0 ? 'bar active-bar' : 'bar'} style={{ height: `${Math.max(percent, 4)}%` }} /><small>{index + 1}</small></div>;
+          })}
+        </div> : <div className="empty-state compact-empty">Statistik akan muncul setelah siswa mulai mengerjakan.</div>}
       </div>
     </section>
 
     <section className="panel recent-panel">
       <div className="panel-heading"><div><h2>Ujian terbaru</h2><p>Ujian yang baru dibuat atau diperbarui</p></div><button className="text-button" onClick={onOpenExams}>Semua ujian <ArrowUpRight size={15} /></button></div>
-      <ExamTable exams={exams.slice(0, 4)} />
+      {exams.length ? <ExamTable exams={exams.slice(0, 4)} onPublish={onPublish} /> : <div className="empty-state">Belum ada ujian tersimpan di server.</div>}
     </section>
 
-    <footer className="page-footer"><span>© 2026 ExamEdu</span><span>Panel pengajar <i>·</i> Data demo disimpan di browser</span></footer>
+    <footer className="page-footer"><span>© 2026 ExamEdu</span><span>Panel pengajar <i>·</i> Data disimpan di server</span></footer>
   </>;
 }
 
@@ -202,27 +301,27 @@ function StatCard({ label, value, note, icon, tone, trend }: { label: string; va
   return <div className="stat-card"><div className="stat-top"><span>{label}</span><span className={`stat-icon ${tone}`}>{icon}</span></div><div className="stat-value">{value}</div><div className="stat-note"><span>{note}</span><span className="stat-trend">{trend}</span></div></div>;
 }
 
-function ExamList({ exams, onCreate }: { exams: Exam[]; onCreate: () => void }) {
+function ExamList({ exams, onCreate, onPublish }: { exams: Exam[]; onCreate: () => void; onPublish: (id: string) => void }) {
   const [filter, setFilter] = useState<'Semua' | ExamStatus>('Semua');
   const shown = filter === 'Semua' ? exams : exams.filter((exam) => exam.status === filter);
   return <>
     <PageHeading eyebrow="KELOLA PENILAIAN" title="Semua ujian" description="Atur jadwal, peserta, dan status ujian di satu tempat." action={<button className="primary-button" onClick={onCreate}><Plus size={17} /> Buat ujian</button>} />
     <div className="panel list-panel">
-      <div className="filter-row"><div className="filter-tabs">{(['Semua', 'Aktif', 'Draft', 'Selesai'] as const).map((item) => <button key={item} className={filter === item ? 'filter-tab active' : 'filter-tab'} onClick={() => setFilter(item)}>{item}<span>{item === 'Semua' ? exams.length : exams.filter((exam) => exam.status === item).length}</span></button>)}</div><button className="outline-button"><CalendarDays size={15} /> Urutkan tanggal</button></div>
-      <ExamTable exams={shown} />
+      <div className="filter-row"><div className="filter-tabs">{(['Semua', 'Aktif', 'Draft', 'Selesai'] as const).map((item) => <button key={item} className={filter === item ? 'filter-tab active' : 'filter-tab'} onClick={() => setFilter(item)}>{item}<span>{item === 'Semua' ? exams.length : exams.filter((exam) => exam.status === item).length}</span></button>)}</div><span className="outline-button"><CalendarDays size={15} /> Data sinkron</span></div>
+      <ExamTable exams={shown} onPublish={onPublish} />
       {shown.length === 0 && <div className="empty-state">Tidak ada ujian yang cocok. Coba kata kunci atau filter lain.</div>}
     </div>
-    <footer className="page-footer"><span>© 2026 ExamEdu</span><span>Panel pengajar <i>·</i> Data demo disimpan di browser</span></footer>
+    <footer className="page-footer"><span>© 2026 ExamEdu</span><span>Panel pengajar <i>·</i> Data disimpan di server</span></footer>
   </>;
 }
 
-function ExamTable({ exams }: { exams: Exam[] }) {
-  return <div className="table-scroll"><table className="exam-table"><thead><tr><th>NAMA UJIAN</th><th>MATA PELAJARAN</th><th>JADWAL</th><th>PESERTA</th><th>STATUS</th><th /></tr></thead><tbody>{exams.map((exam) => <tr key={exam.id}>
-    <td><div className="exam-name"><span className={`subject-mark small-mark ${exam.color}`}><BookOpen size={15} /></span><div><b>{exam.title}</b><small>{exam.id} <span>·</span> {exam.grade}</small></div></div></td>
+function ExamTable({ exams, onPublish }: { exams: Exam[]; onPublish: (id: string) => void }) {
+  return <div className="table-scroll"><table className="exam-table"><thead><tr><th>NAMA UJIAN</th><th>MATA PELAJARAN</th><th>JADWAL</th><th>PESERTA</th><th>STATUS</th><th>AKSI</th></tr></thead><tbody>{exams.map((exam) => <tr key={exam.id}>
+    <td><div className="exam-name"><span className={`subject-mark small-mark ${exam.color}`}><BookOpen size={15} /></span><div><b>{exam.title}</b><small>{exam.id.slice(0, 8)} <span>·</span> {exam.grade} <span>·</span> {exam.questionCount} soal</small></div></div></td>
     <td>{exam.subject}</td><td>{formatDate(exam.date)}<small className="cell-subtext">{exam.duration} menit</small></td>
     <td><span className="participant-count"><UsersRound size={14} /> {exam.participants}</span></td>
     <td><span className={`status-pill ${exam.status.toLowerCase()}`}><i />{exam.status}</span></td>
-    <td><button className="more-button" aria-label={`Menu ${exam.title}`}><MoreHorizontal size={18} /></button></td>
+    <td>{exam.status === 'Draft' ? <button className="publish-button" onClick={() => onPublish(exam.id)}>Terbitkan</button> : <span className="action-hint">Tayang</span>}</td>
   </tr>)}</tbody></table></div>;
 }
 
@@ -234,38 +333,78 @@ function QuestionBank({ onToast }: { onToast: (message: string) => void }) {
     { subject: 'Fisika', title: 'Gerak lurus dan kecepatan', type: 'Pilihan ganda', count: 14, color: 'blue' },
   ];
   return <>
-    <PageHeading eyebrow="MATERI PENILAIAN" title="Bank soal" description="Kelompokkan soal berdasarkan mata pelajaran dan topik." action={<button className="primary-button" onClick={() => onToast('Pembuatan bank soal akan tersedia setelah backend ditambahkan.')}><Plus size={17} /> Tambah soal</button>} />
-    <div className="question-summary"><div className="question-summary-icon"><FileQuestion size={21} /></div><div><b>52 soal tersimpan</b><span>Soal contoh untuk melihat tata letak bank soal.</span></div><button className="outline-button" onClick={() => onToast('Impor soal belum tersedia di versi demo.')}>Impor soal</button></div>
-    <div className="question-grid">{questions.map((question) => <article className="question-card" key={question.title}><div className="question-card-top"><span className={`subject-mark ${question.color}`}><BookOpen size={17} /></span><button className="more-button"><MoreHorizontal size={18} /></button></div><p className="eyebrow">{question.subject}</p><h2>{question.title}</h2><div className="question-card-meta"><span>{question.type}</span><span>·</span><b>{question.count} soal</b></div><button className="card-link" onClick={() => onToast(`Pratinjau “${question.title}” belum tersedia.`)}>Lihat koleksi <ArrowUpRight size={15} /></button></article>)}</div>
-    <div className="info-banner"><span className="info-dot">i</span><p>Bank soal pada MVP ini masih berupa contoh tampilan. Penyimpanan dan pengelolaan soal membutuhkan layanan backend.</p></div>
+    <PageHeading eyebrow="MATERI PENILAIAN" title="Bank soal" description="Koleksi ini masih contoh tampilan; soal untuk ujian baru disimpan bersama ujiannya." action={<button className="primary-button" onClick={() => onToast('Tambahkan soal melalui formulir Buat ujian untuk saat ini.')}><Plus size={17} /> Tambah soal</button>} />
+    <div className="question-summary"><div className="question-summary-icon"><FileQuestion size={21} /></div><div><b>Contoh tampilan bank soal</b><span>Soal contoh di bawah tidak tersimpan sebagai koleksi akun.</span></div><button className="outline-button" onClick={() => onToast('Impor soal belum tersedia.')}>Impor soal</button></div>
+    <div className="question-grid">{questions.map((question) => <article className="question-card" key={question.title}><div className="question-card-top"><span className={`subject-mark ${question.color}`}><BookOpen size={17} /></span><button className="more-button" aria-label="Menu contoh soal"><MoreHorizontal size={18} /></button></div><p className="eyebrow">{question.subject}</p><h2>{question.title}</h2><div className="question-card-meta"><span>{question.type}</span><span>·</span><b>{question.count} soal contoh</b></div><button className="card-link" onClick={() => onToast('Koleksi contoh tidak dapat diedit.')}>Lihat koleksi <ArrowUpRight size={15} /></button></article>)}</div>
+    <div className="info-banner"><span className="info-dot">i</span><p>Bank soal terpisah belum tersedia. Soal yang dibuat pada formulir ujian tersimpan di server dan menjadi bagian dari ujian tersebut.</p></div>
   </>;
 }
 
 function Analytics({ exams }: { exams: Exam[] }) {
   const complete = exams.filter((exam) => exam.status === 'Selesai').length;
   const active = exams.filter((exam) => exam.status === 'Aktif').length;
+  const drafts = exams.filter((exam) => exam.status === 'Draft').length;
+  const totalSubmissions = exams.reduce((sum, exam) => sum + exam.submissionCount, 0);
+  const scoredSubmissions = exams.reduce((sum, exam) => sum + (exam.averageScore === null ? 0 : exam.submissionCount), 0);
+  const average = scoredSubmissions ? exams.reduce((sum, exam) => sum + (exam.averageScore ?? 0) * exam.submissionCount, 0) / scoredSubmissions : null;
   return <>
-    <PageHeading eyebrow="INSIGHT PEMBELAJARAN" title="Analitik ujian" description="Pantau aktivitas dan hasil penilaian kelasmu." action={<button className="outline-button"><CalendarDays size={15} /> Semester ini <ChevronDown size={14} /></button>} />
-    <section className="analytics-cards"><div className="panel analytics-score"><div className="panel-heading"><div><h2>Rata-rata nilai</h2><p>Gabungan seluruh ujian selesai</p></div><span className="stat-icon lavender"><BarChart3 /></span></div><div className="big-score">82,4<span>/100</span></div><p className="score-caption"><span>↗ 4,8%</span> dibanding periode sebelumnya</p><div className="score-meter"><span style={{ width: '82.4%' }} /></div><div className="meter-labels"><span>0</span><span>Target kelas 80</span><span>100</span></div></div><div className="panel completion-panel"><div className="panel-heading"><div><h2>Status ujian</h2><p>Ringkasan ujian di workspace</p></div><MoreHorizontal size={18} className="muted-icon" /></div><div className="completion-ring"><div><b>{exams.length}</b><small>ujian</small></div></div><div className="legend-list"><span><i className="legend-dot active-dot" />Aktif <b>{active}</b></span><span><i className="legend-dot done-dot" />Selesai <b>{complete}</b></span><span><i className="legend-dot draft-dot" />Draft <b>{exams.filter((exam) => exam.status === 'Draft').length}</b></span></div></div></section>
-    <div className="panel insight-panel"><div className="panel-heading"><div><h2>Insight kelas</h2><p>Ringkasan berbasis data contoh</p></div></div><div className="insight-row"><span className="insight-number">01</span><div><b>Partisipasi paling tinggi</b><p>Kelas XI B mencatat penyelesaian ujian sebesar 96%.</p></div><span className="insight-value">96%</span></div><div className="insight-row"><span className="insight-number">02</span><div><b>Topik yang perlu diulas</b><p>Persamaan kuadrat memiliki rata-rata jawaban benar paling rendah.</p></div><span className="insight-value">58%</span></div><div className="insight-row"><span className="insight-number">03</span><div><b>Tren nilai meningkat</b><p>Rata-rata nilai naik pada tiga penilaian terakhir.</p></div><span className="insight-value positive">+4,8%</span></div></div>
-    <div className="info-banner"><span className="info-dot">i</span><p>Analitik ini menampilkan data statis untuk demonstrasi, bukan hasil siswa yang sebenarnya.</p></div>
+    <PageHeading eyebrow="INSIGHT PEMBELAJARAN" title="Analitik ujian" description="Ringkasan hanya menggunakan hasil siswa yang dikumpulkan di server." action={<span className="outline-button"><CalendarDays size={15} /> Semua data</span>} />
+    <section className="analytics-cards"><div className="panel analytics-score"><div className="panel-heading"><div><h2>Rata-rata nilai</h2><p>Dari ujian yang sudah dikumpulkan</p></div><span className="stat-icon lavender"><BarChart3 /></span></div><div className="big-score">{average === null ? '—' : average.toLocaleString('id-ID', { maximumFractionDigits: 1 })}<span>{average === null ? '' : '/100'}</span></div><p className="score-caption">{totalSubmissions} jawaban sudah dikumpulkan</p><div className="score-meter"><span style={{ width: `${average ?? 0}%` }} /></div><div className="meter-labels"><span>0</span><span>Nilai aktual</span><span>100</span></div></div><div className="panel completion-panel"><div className="panel-heading"><div><h2>Status ujian</h2><p>Ujian pada akun Anda</p></div><MoreHorizontal size={18} className="muted-icon" /></div><div className="completion-ring"><div><b>{exams.length}</b><small>ujian</small></div></div><div className="legend-list"><span><i className="legend-dot active-dot" />Terbit <b>{active}</b></span><span><i className="legend-dot done-dot" />Selesai <b>{complete}</b></span><span><i className="legend-dot draft-dot" />Draft <b>{drafts}</b></span></div></div></section>
+    <div className="panel insight-panel"><div className="panel-heading"><div><h2>Ringkasan data</h2><p>Statistik server aktual</p></div></div>{exams.length ? exams.map((exam) => <div className="insight-row" key={exam.id}><span className="insight-number">{exam.title.slice(0, 2).toUpperCase()}</span><div><b>{exam.title}</b><p>{exam.subject} · {exam.submissionCount} jawaban dikumpulkan dari {exam.participants} peserta.</p></div><span className="insight-value">{exam.averageScore === null ? '—' : `${exam.averageScore}`}</span></div>) : <div className="empty-state">Belum ada data ujian.</div>}</div>
   </>;
 }
 
-function CreateExamModal({ onClose, onSave }: { onClose: () => void; onSave: (exam: Omit<Exam, 'id' | 'status' | 'participants' | 'color'>) => void }) {
+function CreateExamModal({ onClose, onSave }: { onClose: () => void; onSave: (exam: ExamInput) => Promise<void> }) {
   const [title, setTitle] = useState('');
   const [subject, setSubject] = useState('Matematika');
   const [grade, setGrade] = useState('Kelas IX A');
   const [date, setDate] = useState('2026-11-20');
   const [duration, setDuration] = useState('60');
+  const [questions, setQuestions] = useState<QuestionInput[]>([{ prompt: '', options: ['', '', '', ''], answer: 0, explanation: '' }]);
   const [error, setError] = useState('');
-  const submit = (event: React.FormEvent<HTMLFormElement>) => {
+  const [saving, setSaving] = useState(false);
+
+  function updateQuestion(index: number, update: Partial<QuestionInput>) {
+    setQuestions((current) => current.map((question, position) => position === index ? { ...question, ...update } : question));
+  }
+
+  function updateOption(questionIndex: number, optionIndex: number, value: string) {
+    setQuestions((current) => current.map((question, position) => position === questionIndex ? {
+      ...question, options: question.options.map((option, index) => index === optionIndex ? value : option),
+    } : question));
+  }
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    setError('');
     if (!title.trim()) { setError('Nama ujian perlu diisi.'); return; }
-    onSave({ title: title.trim(), subject, grade, date, duration: Math.max(1, Number(duration) || 60) });
-    onClose();
-  };
-  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><p className="eyebrow">UJIAN BARU</p><h2 id="modal-title">Buat ujian</h2><p>Lengkapi informasi dasar. Ujian disimpan sebagai draft.</p></div><button className="icon-button" aria-label="Tutup" onClick={onClose}><X size={19} /></button></div><form onSubmit={submit} className="exam-form"><label>Nama ujian<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Contoh: Penilaian Akhir Bab 1" /></label><div className="form-two-col"><label>Mata pelajaran<select value={subject} onChange={(event) => setSubject(event.target.value)}><option>Matematika</option><option>Biologi</option><option>Bahasa Indonesia</option><option>Fisika</option><option>Bahasa Inggris</option><option>Sejarah</option></select></label><label>Kelas<select value={grade} onChange={(event) => setGrade(event.target.value)}><option>Kelas VII A</option><option>Kelas VIII C</option><option>Kelas IX A</option><option>Kelas X A</option><option>Kelas XI B</option><option>Kelas XII</option></select></label></div><div className="form-two-col"><label>Tanggal ujian<input type="date" value={date} onChange={(event) => setDate(event.target.value)} required /></label><label>Durasi (menit)<input type="number" min="1" max="300" value={duration} onChange={(event) => setDuration(event.target.value)} required /></label></div>{error && <p className="form-error">{error}</p>}<div className="modal-actions"><button type="button" className="outline-button" onClick={onClose}>Batal</button><button type="submit" className="primary-button"><Check size={16} /> Simpan draft</button></div></form></section></div>;
+    if (questions.some((question) => !question.prompt.trim() || question.options.some((option) => !option.trim()))) {
+      setError('Lengkapi teks soal dan keempat pilihan jawaban.');
+      return;
+    }
+    setSaving(true);
+    try {
+      await onSave({ title: title.trim(), subject, grade, date, duration: Math.max(1, Number(duration) || 60), questions });
+      onClose();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : 'Ujian gagal disimpan.');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal-card exam-editor-card" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><p className="eyebrow">UJIAN BARU</p><h2 id="modal-title">Buat ujian</h2><p>Ujian tersimpan sebagai draft. Anda dapat menerbitkannya dari daftar ujian.</p></div><button className="icon-button" aria-label="Tutup" onClick={onClose}><X size={19} /></button></div><form onSubmit={(event) => void submit(event)} className="exam-form">
+    <label>Nama ujian<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder="Contoh: Penilaian Akhir Bab 1" /></label>
+    <div className="form-two-col"><label>Mata pelajaran<select value={subject} onChange={(event) => setSubject(event.target.value)}><option>Matematika</option><option>Biologi</option><option>Bahasa Indonesia</option><option>Fisika</option><option>Bahasa Inggris</option><option>Sejarah</option></select></label><label>Kelas<select value={grade} onChange={(event) => setGrade(event.target.value)}><option>Kelas VII A</option><option>Kelas VIII C</option><option>Kelas IX A</option><option>Kelas X A</option><option>Kelas XI B</option><option>Kelas XII</option></select></label></div>
+    <div className="form-two-col"><label>Tanggal ujian<input type="date" value={date} onChange={(event) => setDate(event.target.value)} required /></label><label>Durasi (menit)<input type="number" min="1" max="300" value={duration} onChange={(event) => setDuration(event.target.value)} required /></label></div>
+    <div className="question-editor-heading"><div><b>Soal pilihan ganda</b><small>Minimal satu soal; maksimal 30 per ujian.</small></div><button type="button" className="outline-button" disabled={questions.length >= 30} onClick={() => setQuestions((current) => [...current, { prompt: '', options: ['', '', '', ''], answer: 0, explanation: '' }])}><Plus size={15} /> Tambah soal</button></div>
+    <div className="question-editor-list">{questions.map((question, index) => <fieldset className="question-editor" key={index}><legend>Soal {index + 1}</legend>{questions.length > 1 && <button type="button" className="remove-question" aria-label={`Hapus soal ${index + 1}`} onClick={() => setQuestions((current) => current.filter((_, position) => position !== index))}><X size={15} /></button>}
+      <label>Pertanyaan<textarea value={question.prompt} onChange={(event) => updateQuestion(index, { prompt: event.target.value })} maxLength={1000} rows={2} required placeholder="Tulis pertanyaan…" /></label>
+      <div className="answer-choice-grid">{question.options.map((option, optionIndex) => <label key={optionIndex}><span>Pilihan {String.fromCharCode(65 + optionIndex)}</span><input value={option} onChange={(event) => updateOption(index, optionIndex, event.target.value)} maxLength={300} required placeholder={`Jawaban ${String.fromCharCode(65 + optionIndex)}`} /></label>)}</div>
+      <div className="form-two-col"><label>Kunci jawaban<select value={question.answer} onChange={(event) => updateQuestion(index, { answer: Number(event.target.value) })}>{question.options.map((_, optionIndex) => <option key={optionIndex} value={optionIndex}>Pilihan {String.fromCharCode(65 + optionIndex)}</option>)}</select></label><label>Pembahasan (opsional)<input value={question.explanation} onChange={(event) => updateQuestion(index, { explanation: event.target.value })} maxLength={1000} placeholder="Penjelasan setelah ujian" /></label></div>
+    </fieldset>)}</div>
+    {error && <p className="form-error" role="alert">{error}</p>}<div className="modal-actions"><button type="button" className="outline-button" onClick={onClose}>Batal</button><button type="submit" className="primary-button" disabled={saving}><Check size={16} /> {saving ? 'Menyimpan…' : 'Simpan draft'}</button></div>
+  </form></section></div>;
 }
 
 export default App;
