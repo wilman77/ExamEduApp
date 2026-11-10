@@ -4,7 +4,7 @@ API bersama berada di `functions/exam-api/index.ts`. API menggunakan PostgreSQL 
 
 ## Database dan API
 
-Terapkan `server/migrations/001_initial.sql` pada database Supabase baru sebelum API dipakai. Tabel aplikasi memakai Row Level Security tanpa kebijakan akses langsung browser. API mengakses database melalui koneksi server, bukan melalui Data API publik.
+Pada database Supabase baru, jalankan `server/migrations/001_initial.sql`, lalu `server/migrations/002_question_options_four_or_five.sql` sebelum API dipakai. Untuk database yang sudah berada pada versi 1, jalankan hanya migration 002 melalui SQL Editor; migration itu hanya mengganti constraints dan tidak menghapus data. Tabel aplikasi memakai Row Level Security tanpa kebijakan akses langsung browser. API mengakses database melalui koneksi server, bukan melalui Data API publik.
 
 Deploy fungsi bernama `exam-api`, dengan `verify_jwt = false` sesuai `config.toml`. JWT gateway Supabase sengaja tidak dipakai karena API memverifikasi cookie sesi sendiri pada setiap route yang membutuhkan akun; jangan menghapus autentikasi aplikasi.
 

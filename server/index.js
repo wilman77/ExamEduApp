@@ -48,11 +48,15 @@ async function migrate() {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1)', [48201921]);
     await client.query('CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, applied_at BIGINT NOT NULL)');
-    const applied = await client.query('SELECT version FROM schema_migrations WHERE version = $1', [1]);
-    if (applied.rowCount === 0) {
-      const migration = fs.readFileSync(path.join(migrationDirectory, '001_initial.sql'), 'utf8');
-      await client.query(migration);
-      await client.query('INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)', [1, Date.now()]);
+    const applied = new Set((await client.query('SELECT version FROM schema_migrations')).rows.map(({ version }) => Number(version)));
+    const migrations = fs.readdirSync(migrationDirectory)
+      .filter((file) => /^\d+_.+\.sql$/.test(file))
+      .map((file) => ({ file, version: Number(file.match(/^\d+/)[0]) }))
+      .sort((a, b) => a.version - b.version);
+    for (const migration of migrations) {
+      if (applied.has(migration.version)) continue;
+      await client.query(fs.readFileSync(path.join(migrationDirectory, migration.file), 'utf8'));
+      await client.query('INSERT INTO schema_migrations (version, applied_at) VALUES ($1, $2)', [migration.version, Date.now()]);
     }
     await client.query('COMMIT');
   } catch (error) {
@@ -305,8 +309,8 @@ function validateExamInput(body) {
   if (!Array.isArray(body.questions) || body.questions.length < 1 || body.questions.length > 30) return 'Ujian harus memiliki 1 sampai 30 soal.';
   for (const [index, question] of body.questions.entries()) {
     if (!question || typeof question.prompt !== 'string' || !question.prompt.trim() || question.prompt.trim().length > 1000) return `Teks soal ${index + 1} wajib diisi (maksimal 1000 karakter).`;
-    if (!Array.isArray(question.options) || question.options.length !== 4 || question.options.some((option) => typeof option !== 'string' || !option.trim() || option.trim().length > 300)) return `Soal ${index + 1} harus memiliki empat pilihan jawaban.`;
-    if (!Number.isInteger(question.answer) || question.answer < 0 || question.answer > 3) return `Kunci jawaban soal ${index + 1} tidak valid.`;
+    if (!Array.isArray(question.options) || ![4, 5].includes(question.options.length) || question.options.some((option) => typeof option !== 'string' || !option.trim() || option.trim().length > 300)) return `Soal ${index + 1} harus memiliki empat atau lima pilihan jawaban.`;
+    if (!Number.isInteger(question.answer) || question.answer < 0 || question.answer >= question.options.length) return `Kunci jawaban soal ${index + 1} tidak valid.`;
     if (typeof question.explanation !== 'string' || question.explanation.length > 1000) return `Pembahasan soal ${index + 1} terlalu panjang.`;
   }
   return null;

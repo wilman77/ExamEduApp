@@ -70,7 +70,7 @@ try {
   const examInput = {
     title: `Integration exam ${suffix}`, subject: 'Testing', grade: 'Test', date: '2026-11-10', duration: 30,
     questions: [
-      { prompt: 'Choose B', options: ['A', 'B', 'C', 'D'], answer: 1, explanation: 'B is correct.' },
+      { prompt: 'Choose E', options: ['A', 'B', 'C', 'D', 'E'], answer: 4, explanation: 'E is correct.' },
       { prompt: 'Choose C', options: ['A', 'B', 'C', 'D'], answer: 2, explanation: 'C is correct.' },
     ],
   };
@@ -97,15 +97,15 @@ try {
   status(await call(`/api/attempts/${attemptId}/answers`, { ...student, method: 'PUT', body: { answers: { 0: 0, 1: 2 } } }), 200);
   const [save, submitted] = await Promise.all([
     call(`/api/attempts/${attemptId}/answers`, { ...student, method: 'PUT', body: { answers: { 0: 0, 1: 0 } } }),
-    call(`/api/attempts/${attemptId}/submit`, { ...student, method: 'POST', body: { answers: { 0: 1, 1: 2 } } }),
+    call(`/api/attempts/${attemptId}/submit`, { ...student, method: 'POST', body: { answers: { 0: 4, 1: 2 } } }),
   ]);
   assert.ok([200, 409].includes(save.status));
   status(submitted, 200);
   assert.equal(submitted.body.attempt.result.percentage, 100);
   assert.equal(submitted.body.attempt.result.score, 2);
   const completed = status(await call(`/api/attempts/${attemptId}`, student), 200).body.attempt;
-  assert.deepEqual(completed.answers, { 0: 1, 1: 2 });
-  assert.equal(completed.questions[0].answer, 1);
+  assert.deepEqual(completed.answers, { 0: 4, 1: 2 });
+  assert.equal(completed.questions[0].answer, 4);
   assert.equal(typeof completed.submittedAt, 'number');
   status(await call(`/api/attempts/${attemptId}/answers`, { ...student, method: 'PUT', body: { answers: {} } }), 409);
   status(await call(`/api/exams/${examId}/attempts`, { ...student, method: 'POST', body: {} }), 409);

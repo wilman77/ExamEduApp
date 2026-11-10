@@ -1,6 +1,6 @@
 # ExamEdu API
 
-API Node.js untuk **ExamEduApp** (pengajar) dan **ExamPortalApp** (siswa). Penyimpanan memakai PostgreSQL; skema dibuat otomatis saat server mulai dari `migrations/001_initial.sql`. Backend tidak lagi memakai SQLite.
+API Node.js untuk **ExamEduApp** (pengajar) dan **ExamPortalApp** (siswa). Penyimpanan memakai PostgreSQL; skema dan migration bernomor di `migrations/` diterapkan otomatis saat server mulai. Migration bersifat non-destruktif dan tidak menghapus data. Backend tidak lagi memakai SQLite.
 
 ## Menjalankan lokal
 
@@ -14,7 +14,9 @@ cp .env.example .env
 npm run dev
 ```
 
-Untuk Supabase, gunakan URL dari **Connect → Session pooler** (port 5432) sebagai `DATABASE_URL`, atau isi konfigurasi terpisah `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, dan `PGPASSWORD`. Format terpisah berguna jika password disediakan sebagai secret opaque dan tidak boleh dimasukkan ke URL. Pastikan `DATABASE_SSL=true`. Server menjalankan migrasi skema versi 1 saat startup.
+Untuk Supabase, gunakan URL dari **Connect → Session pooler** (port 5432) sebagai `DATABASE_URL`, atau isi konfigurasi terpisah `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, dan `PGPASSWORD`. Format terpisah berguna jika password disediakan sebagai secret opaque dan tidak boleh dimasukkan ke URL. Pastikan `DATABASE_SSL=true`. Server menjalankan semua migration yang belum tercatat pada `schema_migrations` saat startup.
+
+Untuk database yang sudah menjalankan migration versi 1, langkah SQL/deploy manualnya adalah menjalankan isi `migrations/002_question_options_four_or_five.sql` sekali melalui SQL Editor Supabase. Migration tersebut hanya mengganti constraints dan tidak menghapus data. Jika backend dijalankan dengan `node index.js`, migration runner akan menerapkannya otomatis.
 
 Di terminal lain, jalankan kedua frontend (`npm run dev`; ExamPortalApp dapat memakai port 5174). Atur `VITE_API_URL` pada build frontend ke URL backend; saat pengembangan lokal, kosongkan agar Vite memakai proxy `/api` ke port 8787. Guru mendaftar dengan `TEACHER_SIGNUP_CODE`; siswa dapat membuat akun tanpa kode.
 

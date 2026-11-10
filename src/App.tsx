@@ -356,11 +356,11 @@ function Analytics({ exams }: { exams: Exam[] }) {
 
 function CreateExamModal({ onClose, onSave }: { onClose: () => void; onSave: (exam: ExamInput) => Promise<void> }) {
   const [title, setTitle] = useState('');
-  const [subject, setSubject] = useState('Matematika');
+  const [subject, setSubject] = useState('Pengetahuan Umum');
   const [grade, setGrade] = useState('Kelas IX A');
   const [date, setDate] = useState('2026-11-20');
   const [duration, setDuration] = useState('60');
-  const [questions, setQuestions] = useState<QuestionInput[]>([{ prompt: '', options: ['', '', '', ''], answer: 0, explanation: '' }]);
+  const [questions, setQuestions] = useState<QuestionInput[]>([{ prompt: '', options: ['', '', '', '', ''], answer: 0, explanation: '' }]);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
 
@@ -379,7 +379,7 @@ function CreateExamModal({ onClose, onSave }: { onClose: () => void; onSave: (ex
     setError('');
     if (!title.trim()) { setError('Nama ujian perlu diisi.'); return; }
     if (questions.some((question) => !question.prompt.trim() || question.options.some((option) => !option.trim()))) {
-      setError('Lengkapi teks soal dan keempat pilihan jawaban.');
+      setError('Lengkapi teks soal dan kelima pilihan jawaban.');
       return;
     }
     setSaving(true);
@@ -395,9 +395,9 @@ function CreateExamModal({ onClose, onSave }: { onClose: () => void; onSave: (ex
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal-card exam-editor-card" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><p className="eyebrow">UJIAN BARU</p><h2 id="modal-title">Buat ujian</h2><p>Ujian tersimpan sebagai draft. Anda dapat menerbitkannya dari daftar ujian.</p></div><button className="icon-button" aria-label="Tutup" onClick={onClose}><X size={19} /></button></div><form onSubmit={(event) => void submit(event)} className="exam-form">
     <label>Nama ujian<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder="Contoh: Penilaian Akhir Bab 1" /></label>
-    <div className="form-two-col"><label>Mata pelajaran<select value={subject} onChange={(event) => setSubject(event.target.value)}><option>Matematika</option><option>Biologi</option><option>Bahasa Indonesia</option><option>Fisika</option><option>Bahasa Inggris</option><option>Sejarah</option></select></label><label>Kelas<select value={grade} onChange={(event) => setGrade(event.target.value)}><option>Kelas VII A</option><option>Kelas VIII C</option><option>Kelas IX A</option><option>Kelas X A</option><option>Kelas XI B</option><option>Kelas XII</option></select></label></div>
+    <div className="form-two-col"><label>Mata pelajaran<select value={subject} onChange={(event) => setSubject(event.target.value)}><option>Pengetahuan Umum</option><option>Matematika</option><option>Biologi</option><option>Bahasa Indonesia</option><option>Fisika</option><option>Bahasa Inggris</option><option>Sejarah</option></select></label><label>Kelas<select value={grade} onChange={(event) => setGrade(event.target.value)}><option>Kelas VII A</option><option>Kelas VIII C</option><option>Kelas IX A</option><option>Kelas X A</option><option>Kelas XI B</option><option>Kelas XII</option></select></label></div>
     <div className="form-two-col"><label>Tanggal ujian<input type="date" value={date} onChange={(event) => setDate(event.target.value)} required /></label><label>Durasi (menit)<input type="number" min="1" max="300" value={duration} onChange={(event) => setDuration(event.target.value)} required /></label></div>
-    <div className="question-editor-heading"><div><b>Soal pilihan ganda</b><small>Minimal satu soal; maksimal 30 per ujian.</small></div><button type="button" className="outline-button" disabled={questions.length >= 30} onClick={() => setQuestions((current) => [...current, { prompt: '', options: ['', '', '', ''], answer: 0, explanation: '' }])}><Plus size={15} /> Tambah soal</button></div>
+    <div className="question-editor-heading"><div><b>Soal pilihan ganda</b><small>Minimal satu soal; maksimal 30 per ujian.</small></div><button type="button" className="outline-button" disabled={questions.length >= 30} onClick={() => setQuestions((current) => [...current, { prompt: '', options: ['', '', '', '', ''], answer: 0, explanation: '' }])}><Plus size={15} /> Tambah soal</button></div>
     <div className="question-editor-list">{questions.map((question, index) => <fieldset className="question-editor" key={index}><legend>Soal {index + 1}</legend>{questions.length > 1 && <button type="button" className="remove-question" aria-label={`Hapus soal ${index + 1}`} onClick={() => setQuestions((current) => current.filter((_, position) => position !== index))}><X size={15} /></button>}
       <label>Pertanyaan<textarea value={question.prompt} onChange={(event) => updateQuestion(index, { prompt: event.target.value })} maxLength={1000} rows={2} required placeholder="Tulis pertanyaan…" /></label>
       <div className="answer-choice-grid">{question.options.map((option, optionIndex) => <label key={optionIndex}><span>Pilihan {String.fromCharCode(65 + optionIndex)}</span><input value={option} onChange={(event) => updateOption(index, optionIndex, event.target.value)} maxLength={300} required placeholder={`Jawaban ${String.fromCharCode(65 + optionIndex)}`} /></label>)}</div>
