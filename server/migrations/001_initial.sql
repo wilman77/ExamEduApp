@@ -55,3 +55,11 @@ CREATE TABLE IF NOT EXISTS attempts (
   UNIQUE(student_id, exam_id)
 );
 CREATE INDEX IF NOT EXISTS attempts_exam_idx ON attempts(exam_id);
+
+-- The API uses a privileged server-side Postgres connection, never direct browser access.
+-- With no policies, RLS denies direct access by unprivileged API roles.
+ALTER TABLE users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE sessions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE exams ENABLE ROW LEVEL SECURITY;
+ALTER TABLE questions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE attempts ENABLE ROW LEVEL SECURITY;

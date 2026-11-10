@@ -34,3 +34,7 @@ Frontend meneruskan permintaan `/api` ke `http://localhost:8787`. Untuk setup no
 Bank soal terpisah dan beberapa pengaturan workspace masih contoh/placeholder. `render.yaml` menyiapkan backend pada Render Free dengan database Supabase PostgreSQL eksternal; URL aktif dan environment tetap harus diselesaikan di platform hosting. Paket gratis dapat tidur/dijeda dan tidak cocok untuk ujian produksi yang kritis. Gunakan HTTPS, pengelolaan secret dan backup yang sesuai sebelum dipakai untuk ujian resmi; backend dasar ini bukan sistem proctoring atau anti-kecurangan.
 
 > **Akses kelas:** semua siswa terdaftar saat ini dapat melihat semua ujian terbit. Kelas pada form masih label, bukan pembatas akses; jangan gunakan untuk membagikan ujian rahasia per kelas sebelum roster/enrollment ditambahkan.
+
+## Deploy frontend ke Cloudflare Pages
+
+Buat Pages project dari repositori ini dengan build command `npm ci && npm run build` dan output directory `dist`. Biarkan `VITE_API_URL` tidak disetel atau kosong agar browser memakai proxy same-origin `/api`. Pada Pages **Settings → Variables and Secrets**, set runtime variable `API_ORIGIN` ke `https://yzntkqprdubjmkhzvmad.supabase.co/functions/v1/exam-api` (HTTPS wajib). Jangan membuat file `.env` berisi secret. Setelah dua project memiliki host produksi `*.pages.dev`, tambahkan kedua origin tersebut secara persis ke `APP_ORIGINS` pada backend Supabase; cookie sesi tetap host-only dan proxy tidak mengubahnya menjadi bearer token. Cloudflare Pages Free dapat dipakai tanpa kartu atau paket berbayar.
