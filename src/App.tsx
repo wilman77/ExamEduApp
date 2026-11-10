@@ -24,7 +24,39 @@ import { api, type ExamDto, type ExamInput, type QuestionInput, type User } from
 
 type ExamStatus = 'Aktif' | 'Draft' | 'Selesai';
 type Exam = Omit<ExamDto, 'status'> & { status: ExamStatus; color: string };
-type Page = 'Ringkasan' | 'Ujian' | 'Bank soal' | 'Analitik';
+type Page = 'Ringkasan' | 'Ujian' | 'Bank soal' | 'Analitik' | 'Pengaturan';
+type WorkspacePreferences = { name: string; subjects: string[]; classes: string[] };
+
+const DEFAULT_WORKSPACE: WorkspacePreferences = {
+  name: 'Sekolah Cendekia',
+  subjects: ['Pengetahuan Umum', 'Matematika', 'Biologi', 'Bahasa Indonesia', 'Fisika', 'Bahasa Inggris', 'Sejarah'],
+  classes: ['Kelas VII A', 'Kelas VIII C', 'Kelas IX A', 'Kelas X A', 'Kelas XI B', 'Kelas XII'],
+};
+
+function workspaceStorageKey(userId: string) {
+  return `examedu-workspace-${userId}`;
+}
+
+function readWorkspace(userId: string): WorkspacePreferences {
+  try {
+    const stored = window.localStorage.getItem(workspaceStorageKey(userId));
+    if (!stored) return DEFAULT_WORKSPACE;
+    const value = JSON.parse(stored) as Partial<WorkspacePreferences>;
+    const cleanList = (items: unknown, fallback: string[]) => {
+      if (!Array.isArray(items)) return fallback;
+      const unique = [...new Map(items.filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim()).filter(Boolean).map((item) => [item.toLocaleLowerCase('id-ID'), item])).values()];
+      return unique.length ? unique : fallback;
+    };
+    return {
+      name: typeof value.name === 'string' && value.name.trim() ? value.name.trim().slice(0, 80) : DEFAULT_WORKSPACE.name,
+      subjects: cleanList(value.subjects, DEFAULT_WORKSPACE.subjects),
+      classes: cleanList(value.classes, DEFAULT_WORKSPACE.classes),
+    };
+  } catch {
+    return DEFAULT_WORKSPACE;
+  }
+}
 
 const navItems: { label: Page; icon: typeof LayoutDashboard }[] = [
   { label: 'Ringkasan', icon: LayoutDashboard },
@@ -58,6 +90,7 @@ function App() {
   const [query, setQuery] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [toast, setToast] = useState('');
+  const [workspace, setWorkspace] = useState<WorkspacePreferences>(DEFAULT_WORKSPACE);
 
   async function loadExams() {
     setDataLoading(true);
@@ -94,6 +127,10 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (user?.id) setWorkspace(readWorkspace(user.id));
+  }, [user?.id]);
+
+  useEffect(() => {
     if (!toast) return;
     const timer = window.setTimeout(() => setToast(''), 2800);
     return () => window.clearTimeout(timer);
@@ -102,6 +139,17 @@ function App() {
   const filteredExams = useMemo(() => exams.filter((exam) =>
     `${exam.title} ${exam.subject} ${exam.grade}`.toLowerCase().includes(query.toLowerCase()),
   ), [exams, query]);
+
+  function saveWorkspace(next: WorkspacePreferences, message = 'Pengaturan workspace tersimpan di browser ini.') {
+    setWorkspace(next);
+    if (!user) return;
+    try {
+      window.localStorage.setItem(workspaceStorageKey(user.id), JSON.stringify(next));
+      setToast(message);
+    } catch {
+      setToast('Penyimpanan browser tidak tersedia. Pengaturan hanya berlaku sampai halaman ditutup.');
+    }
+  }
 
   async function createExam(input: ExamInput) {
     const response = await api.createExam(input);
@@ -140,8 +188,8 @@ function App() {
         </a>
 
         <div className="workspace-switcher">
-          <span className="school-avatar">S</span>
-          <span className="workspace-copy"><b>Sekolah Cendekia</b><small>Workspace sekolah</small></span>
+          <span className="school-avatar">{workspace.name.trim().charAt(0).toUpperCase() || 'S'}</span>
+          <span className="workspace-copy"><b>{workspace.name}</b><small>Workspace sekolah</small></span>
           <ChevronDown size={16} className="muted-icon" />
         </div>
 
@@ -163,7 +211,7 @@ function App() {
         </div>
 
         <div className="sidebar-bottom">
-          <button className="nav-item" onClick={() => setToast('Pengaturan workspace akan ditambahkan kemudian.')}><Settings size={18} /><span>Pengaturan</span></button>
+          <button className={`nav-item ${page === 'Pengaturan' ? 'selected' : ''}`} aria-label="Pengaturan workspace" title="Pengaturan workspace" onClick={() => setPage('Pengaturan')}><Settings size={18} /><span>Pengaturan</span></button>
           <div className="profile-row"><div className="profile-avatar">{initials || 'PG'}</div><div className="profile-copy"><b>{user.name}</b><small>Pengajar</small></div><button className="logout-icon" aria-label="Keluar" title="Keluar" onClick={() => void logout()}><LogOut size={16} /></button></div>
         </div>
       </aside>
@@ -186,10 +234,11 @@ function App() {
           {page === 'Ujian' && <ExamList exams={filteredExams} onCreate={() => setIsModalOpen(true)} onPublish={publishExam} />}
           {page === 'Bank soal' && <QuestionBank onToast={setToast} />}
           {page === 'Analitik' && <Analytics exams={exams} />}
+          {page === 'Pengaturan' && <WorkspaceSettings workspace={workspace} onSave={saveWorkspace} />}
         </div>
       </main>
 
-      {isModalOpen && <CreateExamModal onClose={() => setIsModalOpen(false)} onSave={createExam} />}
+      {isModalOpen && <CreateExamModal subjects={workspace.subjects} classes={workspace.classes} onClose={() => setIsModalOpen(false)} onSave={createExam} />}
       {toast && <div className="toast"><span className="toast-check"><Check size={15} /></span>{toast}</div>}
     </div>
   );
@@ -354,10 +403,64 @@ function Analytics({ exams }: { exams: Exam[] }) {
   </>;
 }
 
-function CreateExamModal({ onClose, onSave }: { onClose: () => void; onSave: (exam: ExamInput) => Promise<void> }) {
+function WorkspaceSettings({ workspace, onSave }: { workspace: WorkspacePreferences; onSave: (next: WorkspacePreferences, message?: string) => void }) {
+  const [name, setName] = useState(workspace.name);
+  useEffect(() => setName(workspace.name), [workspace.name]);
+
+  return <>
+    <PageHeading eyebrow="PREFERENSI WORKSPACE" title="Pengaturan workspace" description="Atur identitas workspace, mata pelajaran, dan kelas untuk ujian." />
+    <div className="settings-grid">
+      <section className="panel settings-panel workspace-settings-panel">
+        <div className="settings-heading"><span className="settings-icon lavender"><Settings size={18} /></span><div><h2>Identitas workspace</h2><p>Nama ini ditampilkan pada menu workspace di panel pengajar.</p></div></div>
+        <form className="settings-form workspace-name-form" onSubmit={(event) => { event.preventDefault(); const trimmed = name.trim(); if (trimmed) onSave({ ...workspace, name: trimmed }, 'Nama workspace berhasil diperbarui.'); }}>
+          <label>Nama workspace<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} required placeholder="Contoh: Sekolah Cendekia" /></label>
+          <button className="primary-button" type="submit"><Check size={16} /> Simpan nama</button>
+        </form>
+      </section>
+      <ManageWorkspaceItems title="Mata pelajaran" description="Pilihan ini tersedia saat membuat ujian baru." items={workspace.subjects} placeholder="Contoh: Kimia" onChange={(items) => onSave({ ...workspace, subjects: items }, 'Daftar mata pelajaran berhasil diperbarui.')} />
+      <ManageWorkspaceItems title="Kelas" description="Pilihan ini tersedia saat membuat ujian baru." items={workspace.classes} placeholder="Contoh: Kelas X B" onChange={(items) => onSave({ ...workspace, classes: items }, 'Daftar kelas berhasil diperbarui.')} />
+    </div>
+    <div className="info-banner settings-storage-note"><span className="info-dot">i</span><p>Pengaturan disimpan di browser dan akun ini pada perangkat yang sedang digunakan. Belum tersinkron ke perangkat atau browser lain.</p></div>
+  </>;
+}
+
+function ManageWorkspaceItems({ title, description, items, placeholder, onChange }: { title: string; description: string; items: string[]; placeholder: string; onChange: (items: string[]) => void }) {
+  const [value, setValue] = useState('');
+  const [error, setError] = useState('');
+
+  function addItem(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const next = value.trim();
+    if (!next) return;
+    if (next.length > 80) { setError('Nama maksimal 80 karakter.'); return; }
+    if (items.some((item) => item.toLocaleLowerCase('id-ID') === next.toLocaleLowerCase('id-ID'))) { setError('Nama ini sudah ada di daftar.'); return; }
+    onChange([...items, next]);
+    setValue('');
+    setError('');
+  }
+
+  function removeItem(item: string) {
+    if (items.length <= 1) { setError('Sisakan setidaknya satu pilihan untuk membuat ujian.'); return; }
+    onChange(items.filter((entry) => entry !== item));
+    setError('');
+  }
+
+  return <section className="panel settings-panel">
+    <div className="settings-heading"><span className="settings-icon lavender">{title === 'Kelas' ? <UsersRound size={18} /> : <BookOpen size={18} />}</span><div><h2>{title}</h2><p>{description}</p></div><span className="settings-count">{items.length}</span></div>
+    <form className="settings-form settings-add-form" onSubmit={(event) => void addItem(event)}>
+      <label className="visually-hidden" htmlFor={`add-${title.toLowerCase().replace(/\s+/g, '-')}`}>Tambah {title.toLowerCase()}</label>
+      <input id={`add-${title.toLowerCase().replace(/\s+/g, '-')}`} value={value} onChange={(event) => { setValue(event.target.value); setError(''); }} maxLength={80} placeholder={placeholder} />
+      <button className="outline-button" type="submit" disabled={!value.trim()}><Plus size={15} /> Tambah</button>
+    </form>
+    {error && <p className="settings-error" role="alert">{error}</p>}
+    <ul className="settings-item-list">{items.map((item) => <li key={item}><span>{item}</span><button type="button" aria-label={`Hapus ${item}`} title={`Hapus ${item}`} onClick={() => removeItem(item)}><X size={15} /></button></li>)}</ul>
+  </section>;
+}
+
+function CreateExamModal({ subjects, classes, onClose, onSave }: { subjects: string[]; classes: string[]; onClose: () => void; onSave: (exam: ExamInput) => Promise<void> }) {
   const [title, setTitle] = useState('');
-  const [subject, setSubject] = useState('Pengetahuan Umum');
-  const [grade, setGrade] = useState('Kelas IX A');
+  const [subject, setSubject] = useState(subjects[0] || '');
+  const [grade, setGrade] = useState(classes[0] || '');
   const [date, setDate] = useState('2026-11-20');
   const [duration, setDuration] = useState('60');
   const [questions, setQuestions] = useState<QuestionInput[]>([{ prompt: '', options: ['', '', '', '', ''], answer: 0, explanation: '' }]);
@@ -395,7 +498,7 @@ function CreateExamModal({ onClose, onSave }: { onClose: () => void; onSave: (ex
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}><section className="modal-card exam-editor-card" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><p className="eyebrow">UJIAN BARU</p><h2 id="modal-title">Buat ujian</h2><p>Ujian tersimpan sebagai draft. Anda dapat menerbitkannya dari daftar ujian.</p></div><button className="icon-button" aria-label="Tutup" onClick={onClose}><X size={19} /></button></div><form onSubmit={(event) => void submit(event)} className="exam-form">
     <label>Nama ujian<input autoFocus value={title} onChange={(event) => setTitle(event.target.value)} maxLength={160} placeholder="Contoh: Penilaian Akhir Bab 1" /></label>
-    <div className="form-two-col"><label>Mata pelajaran<select value={subject} onChange={(event) => setSubject(event.target.value)}><option>Pengetahuan Umum</option><option>Matematika</option><option>Biologi</option><option>Bahasa Indonesia</option><option>Fisika</option><option>Bahasa Inggris</option><option>Sejarah</option></select></label><label>Kelas<select value={grade} onChange={(event) => setGrade(event.target.value)}><option>Kelas VII A</option><option>Kelas VIII C</option><option>Kelas IX A</option><option>Kelas X A</option><option>Kelas XI B</option><option>Kelas XII</option></select></label></div>
+    <div className="form-two-col"><label>Mata pelajaran<select value={subject} onChange={(event) => setSubject(event.target.value)} required>{subjects.map((item) => <option key={item} value={item}>{item}</option>)}</select></label><label>Kelas<select value={grade} onChange={(event) => setGrade(event.target.value)} required>{classes.map((item) => <option key={item} value={item}>{item}</option>)}</select></label></div>
     <div className="form-two-col"><label>Tanggal ujian<input type="date" value={date} onChange={(event) => setDate(event.target.value)} required /></label><label>Durasi (menit)<input type="number" min="1" max="300" value={duration} onChange={(event) => setDuration(event.target.value)} required /></label></div>
     <div className="question-editor-heading"><div><b>Soal pilihan ganda</b><small>Minimal satu soal; maksimal 30 per ujian.</small></div><button type="button" className="outline-button" disabled={questions.length >= 30} onClick={() => setQuestions((current) => [...current, { prompt: '', options: ['', '', '', '', ''], answer: 0, explanation: '' }])}><Plus size={15} /> Tambah soal</button></div>
     <div className="question-editor-list">{questions.map((question, index) => <fieldset className="question-editor" key={index}><legend>Soal {index + 1}</legend>{questions.length > 1 && <button type="button" className="remove-question" aria-label={`Hapus soal ${index + 1}`} onClick={() => setQuestions((current) => current.filter((_, position) => position !== index))}><X size={15} /></button>}
